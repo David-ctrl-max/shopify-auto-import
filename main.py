@@ -13,6 +13,6 @@ def keep_alive():
         return jsonify({"error": "Unauthorized"}), 401
     return jsonify({"status": "alive"}), 200
 
-# 꼭 아래 줄을 추가하세요: Render가 직접 실행할 때 인식이 안 되는 경우 방지용
+# Render에서 수동 실행 시 방지
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
