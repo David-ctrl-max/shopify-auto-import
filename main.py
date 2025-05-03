@@ -9,6 +9,6 @@ def home():
 @app.route("/keep-alive/")
 def keep_alive():
     auth = request.args.get("auth")
-    if auth != "jeffshopsecure":  # 여기를 원하는 값으로 바꾸세요
+    if auth != "jeffshopsecure":
         return jsonify({"error": "Unauthorized"}), 401
     return jsonify({"status": "alive"}), 200
