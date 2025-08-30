@@ -1,0 +1,18 @@
+[
+  {
+    "title": "Aluminum Desktop Phone Holder – Gravity & Electric Stand",
+    "description": "<p>Adjustable aluminum phone stand for desk.</p>",
+    "vendor": "Auto Import",
+    "product_type": "Phone Accessories",
+    "tags": ["phone", "stand", "holder"],
+    "price": 12.99,
+    "currency": "USD",
+    "sku": "STAND-ALU-001",
+    "status": "draft",
+    "images": [
+      "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?q=80&w=1200&auto=format&fit=crop"
+    ],
+    "in_stock": true,
+    "shippable_to_na_eu": true
+  }
+]
