@@ -36,40 +36,46 @@ def keep_alive():
 
 
 # ─────────────────────────────────────────────────────────────
-# 여기서부터 여러분 작업만 연결하면 됩니다.
-# ① 실제 작업(run_all 등)이 있으면 그대로 불러쓰고,
-# ② 없으면 폴백 더미 작업이 돌아가도록 해 두었습니다.
+# 외부 배치 작업 연결부 (없으면 폴백 더미 작업 수행)
 # ─────────────────────────────────────────────────────────────
 
 def _fallback_demo_job():
     """폴백(데모) 작업: 실제 로직이 없을 때 최소 로그만 남깁니다."""
     logging.info("[fallback] SEO/임포트 작업 시작")
-    # TODO: 필요한 경우 실제 로직으로 교체
-    # 예: 사이트맵 재생성, 메타태그 재계산, 외부 API 호출 등
     steps = ["키워드 수집", "메타 생성", "이미지 ALT 점검", "사이트맵 제출"]
     for s in steps:
         logging.info("[fallback] %s", s)
-        time.sleep(0.2)  # 예시용 짧은 대기 (실제 로직에서는 제거해도 됨)
+        time.sleep(0.2)  # 데모용 대기
     logging.info("[fallback] SEO/임포트 작업 완료")
 
-# 실제 작업 함수(여기에 기존 자동 최적화/등록 로직을 호출)
 def run_import_and_seo():
     logging.info("SEO 배치 작업 시작")
 
-    # ① 여러분 프로젝트에 실제 모듈/함수가 있는 경우 먼저 시도
+    # ① 신규 경로: jobs.importer.run_all()
     try:
-        # 예: 리포지토리에 services/importer.py 파일이 있고, 그 안에 run_all() 함수가 있을 때
-        from services.importer import run_all   # ← 실제 경로/함수명으로 바꾸시면 됩니다.
-        logging.info("외부 모듈 실행: services.importer.run_all()")
-        run_all()
-        logging.info("SEO 배치 작업 완료 (외부 모듈)")
+        from jobs.importer import run_all as external_run_all
+        logging.info("외부 모듈 실행: jobs.importer.run_all()")
+        external_run_all()
+        logging.info("SEO 배치 작업 완료 (외부 모듈: jobs)")
         return
     except ModuleNotFoundError:
-        logging.warning("services.importer 모듈을 찾을 수 없습니다. 폴백 작업을 실행합니다.")
+        logging.warning("jobs.importer 모듈을 찾을 수 없습니다. (구경로 시도)")
     except Exception as e:
-        logging.exception("외부 모듈 실행 중 오류: %s", e)
+        logging.exception("jobs.importer.run_all 실행 중 오류: %s", e)
 
-    # ② 외부 모듈이 없거나 실패하면 폴백 작업 실행
+    # ② 구(호환) 경로: services.importer.run_all()
+    try:
+        from services.importer import run_all as external_run_all
+        logging.info("외부 모듈 실행: services.importer.run_all()")
+        external_run_all()
+        logging.info("SEO 배치 작업 완료 (외부 모듈: services)")
+        return
+    except ModuleNotFoundError:
+        logging.warning("services.importer 모듈도 없습니다. 폴백 작업을 실행합니다.")
+    except Exception as e:
+        logging.exception("services.importer.run_all 실행 중 오류: %s", e)
+
+    # ③ 외부 모듈이 없거나 실패하면 폴백 작업 실행
     try:
         _fallback_demo_job()
         logging.info("SEO 배치 작업 완료 (폴백)")
@@ -87,3 +93,4 @@ def register():
 # Render 로컬 실행 방지(서비스 환경에선 gunicorn이 실행)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
