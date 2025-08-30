@@ -4,11 +4,19 @@ import os
 import logging
 import time
 
+# 경로/동적 임포트 유틸
+import sys, pathlib, importlib, importlib.util
+
 # --- 로깅 설정 ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
 )
+
+# --- 프로젝트 루트를 임포트 경로에 추가 ---
+ROOT = pathlib.Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 app = Flask(__name__)
 
@@ -48,32 +56,54 @@ def _fallback_demo_job():
         time.sleep(0.2)  # 데모용 대기
     logging.info("[fallback] SEO/임포트 작업 완료")
 
+
+def _try_import_and_run(module_name: str) -> bool:
+    """module_name.run_all()을 찾아 실행. 성공 시 True, 실패/미존재 시 False."""
+    try:
+        spec = importlib.util.find_spec(module_name)
+        if spec is None:
+            logging.warning("%s 모듈 스펙을 찾을 수 없습니다.", module_name)
+            return False
+
+        mod = importlib.import_module(module_name)
+        func = getattr(mod, "run_all", None)
+        if func is None:
+            logging.warning("%s 안에 run_all()이 없습니다.", module_name)
+            return False
+
+        logging.info("외부 모듈 실행: %s.run_all()", module_name)
+        func()
+        logging.info("SEO 배치 작업 완료 (%s)", module_name)
+        return True
+
+    except Exception as e:
+        logging.exception("%s 실행 중 오류: %s", module_name, e)
+        return False
+
+
 def run_import_and_seo():
     logging.info("SEO 배치 작업 시작")
 
-    # ① 신규 경로: jobs.importer.run_all()
+    # 디버그: 현재 작업 디렉토리/엔트리/sys.path 일부를 로깅
     try:
-        from jobs.importer import run_all as external_run_all
-        logging.info("외부 모듈 실행: jobs.importer.run_all()")
-        external_run_all()
-        logging.info("SEO 배치 작업 완료 (외부 모듈: jobs)")
-        return
-    except ModuleNotFoundError:
-        logging.warning("jobs.importer 모듈을 찾을 수 없습니다. (구경로 시도)")
+        entries = sorted(p.name for p in ROOT.iterdir())
+        logging.info("[debug] CWD=%s", ROOT)
+        logging.info("[debug] 엔트리=%s", entries)
+        logging.info("[debug] sys.path[0:5]=%s", sys.path[:5])
     except Exception as e:
-        logging.exception("jobs.importer.run_all 실행 중 오류: %s", e)
+        logging.warning("[debug] 경로 로깅 실패: %s", e)
+
+    # ① 신규 경로 우선: jobs.importer.run_all()
+    if _try_import_and_run("jobs.importer"):
+        return
+
+    logging.warning("jobs.importer 모듈을 찾을 수 없습니다. (구경로 시도)")
 
     # ② 구(호환) 경로: services.importer.run_all()
-    try:
-        from services.importer import run_all as external_run_all
-        logging.info("외부 모듈 실행: services.importer.run_all()")
-        external_run_all()
-        logging.info("SEO 배치 작업 완료 (외부 모듈: services)")
+    if _try_import_and_run("services.importer"):
         return
-    except ModuleNotFoundError:
-        logging.warning("services.importer 모듈도 없습니다. 폴백 작업을 실행합니다.")
-    except Exception as e:
-        logging.exception("services.importer.run_all 실행 중 오류: %s", e)
+
+    logging.warning("services.importer 모듈도 없습니다. 폴백 작업을 실행합니다.")
 
     # ③ 외부 모듈이 없거나 실패하면 폴백 작업 실행
     try:
@@ -81,6 +111,7 @@ def run_import_and_seo():
         logging.info("SEO 배치 작업 완료 (폴백)")
     except Exception as e:
         logging.exception("폴백 작업 실행 중 오류: %s", e)
+
 
 # 3) 크론이 호출할 엔드포인트: 즉시 202 반환, 작업은 백그라운드 실행
 @app.get("/register")
@@ -90,7 +121,9 @@ def register():
     Thread(target=run_import_and_seo, daemon=True).start()
     return jsonify({"ok": True, "status": "queued"}), 202
 
+
 # Render 로컬 실행 방지(서비스 환경에선 gunicorn이 실행)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
