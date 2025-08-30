@@ -1,3 +1,4 @@
+# jobs/importer.py
 import os, time, logging, requests
 
 # ─────────────────────────────────────────────────────────────
@@ -94,9 +95,16 @@ def _ping_sitemap():
 def run_all():
     t0 = time.time()
     logging.info("[run_all] 실제 SEO/임포트 작업 시작")
-    _connectivity_check()          # 1) 연결/버전/토큰 점검
-    _fetch_sample_products(5)      # 2) 제품 읽기(스코프 확인)
-    _ping_sitemap()                # 3) 선택: 사이트맵 핑
+
+    # 1) 연결/권한 점검 + 2) 샘플 조회 + 3) 사이트맵 핑
+    _connectivity_check()
+    _fetch_sample_products(5)
+    _ping_sitemap()
+
+    # 4) 실제 SEO 자동화 실행 (services.importer.run_all)
+    from services.importer import run_all as seo_run_all
+    seo_run_all()  # 메타 타이틀/디스크립션/ALT 업데이트
+
     logging.info("[run_all] 완료 (%.1fs)", time.time() - t0)
 
 def run():
@@ -109,6 +117,7 @@ def run():
         run_all()
     except Exception as e:
         logging.exception("[run] 작업 실패: %s", e)
+
 
 
 
