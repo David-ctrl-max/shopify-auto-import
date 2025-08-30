@@ -1,13 +1,14 @@
-# services/importer.py
 import os, time, logging, requests
 
-# ── 환경변수 ─────────────────────────────────────────────────────────────
-STORE       = os.environ.get("SHOPIFY_STORE", "").strip()            # 예: jeffs-picks
-TOKEN       = os.environ.get("SHOPIFY_ADMIN_TOKEN", "").strip()      # Admin API access token
+# ─────────────────────────────────────────────────────────────
+# 환경변수
+STORE = os.environ.get("SHOPIFY_STORE", "").strip()               # 예: bj0b8k-kg
+TOKEN = os.environ.get("SHOPIFY_ADMIN_TOKEN", "").strip()         # Admin API Access Token
 API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-07").strip()
 SITEMAP_URL = os.environ.get("SITEMAP_URL", "").strip()
 
-# ── HTTP 세션 ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# HTTP 세션
 SESSION = requests.Session()
 if TOKEN:
     SESSION.headers.update({
@@ -16,47 +17,62 @@ if TOKEN:
         "Accept": "application/json",
         "User-Agent": "shopify-auto-import/1.0"
     })
+
 TIMEOUT = 20
 
-# ── 유틸 ─────────────────────────────────────────────────────────────────
-def _base_url(path: str) -> str:
-    return f"https://{STORE}.myshopify.com/admin/api/{API_VERSION}/{path.lstrip('/')}"
+def _api_base():
+    if not STORE:
+        raise RuntimeError("환경변수 SHOPIFY_STORE 누락 (예: bj0b8k-kg)")
+    return f"https://{STORE}.myshopify.com/admin/api/{API_VERSION}"
 
-def _request(method: str, path: str, params=None, json=None):
-    if not STORE or not TOKEN:
-        raise RuntimeError("SHOPIFY_STORE 또는 SHOPIFY_ADMIN_TOKEN 누락")
-
-    url = _base_url(path)
-    backoff = 0.5
+def _request(method, path, *, params=None, json=None):
+    base = _api_base()
+    url = f"{base}/{path.lstrip('/')}"
+    last_err = None
     for attempt in range(5):
         try:
             r = SESSION.request(method, url, params=params, json=json, timeout=TIMEOUT)
-            # 레이트/일시 오류 재시도
-            if r.status_code in (429, 500, 502, 503, 504):
-                time.sleep(backoff)
-                backoff = min(backoff * 1.8, 5.0)
-                continue
+            if r.status_code == 429:
+                time.sleep(0.6); continue
             r.raise_for_status()
-            if r.text and r.headers.get("Content-Type","").startswith("application/json"):
+            try:
                 return r.json()
-            return {}
+            except ValueError:
+                return {"_raw": r.text}
+        except requests.HTTPError as e:
+            body = ""
+            try: body = r.text[:500]
+            except: pass
+            status = getattr(e.response, "status_code", "N/A")
+            if status == 404:
+                logging.error("Shopify 404 (경로/스토어/버전 확인 필요): %s :: %s", url, body)
+            elif status == 401:
+                logging.error("Shopify 401 (토큰 없음/잘못됨): %s :: %s", url, body)
+            elif status == 403:
+                logging.error("Shopify 403 (스코프 부족? read_products 확인): %s :: %s", url, body)
+            else:
+                logging.error("Shopify 요청 실패(%s): %s :: %s", status, url, body)
+            last_err = e
+            break
         except requests.RequestException as e:
-            if attempt < 4:
-                time.sleep(backoff)
-                backoff = min(backoff * 1.8, 5.0)
-                continue
-            # 최종 실패 시 상세 메시지
-            body = getattr(e, "response", None).text if getattr(e, "response", None) else ""
-            status = getattr(e, "response", None).status_code if getattr(e, "response", None) else "N/A"
-            raise RuntimeError(f"Shopify 요청 실패({status}): {url} :: {body}") from e
+            last_err = e
+            time.sleep(0.4); continue
+    raise RuntimeError(f"Shopify 요청 실패: {url}") from last_err
 
-def _shopify_get(path: str, params=None):
+def _shopify_get(path, params=None):
     return _request("GET", path, params=params)
 
-# ── 작업 루틴 ────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+def _connectivity_check():
+    logging.info("[check] /shop.json 호출로 연결 점검")
+    data = _shopify_get("shop.json")
+    shop = data.get("shop", {}) or {}
+    logging.info("[check] 연결 OK: shop=%s, myshopify=%s, api_version=%s",
+                 shop.get("name"), shop.get("myshopify_domain"), API_VERSION)
+
 def _fetch_sample_products(n=5):
     data = _shopify_get("products.json", {"limit": n})
-    items = data.get("products", []) if isinstance(data, dict) else []
+    items = data.get("products", [])
     logging.info("[shopify] 샘플 상품 %d개", len(items))
     for p in items:
         logging.info(" - %s | %s", p.get("id"), p.get("title"))
@@ -64,10 +80,10 @@ def _fetch_sample_products(n=5):
 
 def _ping_sitemap():
     if not SITEMAP_URL:
-        logging.info("[sitemap] SITEMAP_URL 없음, 건너뜀")
-        return
+        logging.info("[sitemap] SITEMAP_URL 없음 → 건너뜀"); return
     try:
-        r = requests.get("https://www.google.com/ping", params={"sitemap": SITEMAP_URL}, timeout=TIMEOUT)
+        r = requests.get("https://www.google.com/ping",
+                         params={"sitemap": SITEMAP_URL}, timeout=TIMEOUT)
         logging.info("[sitemap] Google ping %s (%d)", SITEMAP_URL, r.status_code)
     except requests.RequestException as e:
         logging.warning("[sitemap] ping 실패: %s", e)
@@ -75,17 +91,22 @@ def _ping_sitemap():
 def run_all():
     t0 = time.time()
     logging.info("[run_all] 실제 SEO/임포트 작업 시작")
-    _fetch_sample_products(5)   # 연결/토큰/버전 확인
-    _ping_sitemap()             # 선택
-    # TODO: 상품 생성/수정, SEO 메타 갱신, 이미지 ALT 채우기 등
+    _connectivity_check()
+    _fetch_sample_products(5)
+    _ping_sitemap()
     logging.info("[run_all] 완료 (%.1fs)", time.time() - t0)
 
 def run():
-    """main.py에서 호출할 수 있는 진입점(옵션)"""
+    missing = []
+    if not STORE: missing.append("SHOPIFY_STORE")
+    if not TOKEN: missing.append("SHOPIFY_ADMIN_TOKEN")
+    if missing:
+        logging.error("[run] 필수 환경변수 누락: %s", ", ".join(missing)); return
     try:
         run_all()
     except Exception as e:
         logging.exception("[run] 작업 실패: %s", e)
+
 
 
 
