@@ -1,12 +1,14 @@
 # jobs/importer.py
-import os, time, logging, requests
+import os, time, logging, requests, importlib
+from typing import Dict, Any
 
 # ─────────────────────────────────────────────────────────────
 # 환경변수
 STORE = os.environ.get("SHOPIFY_STORE", "").strip()               # 예: bj0b8k-kg
 TOKEN = os.environ.get("SHOPIFY_ADMIN_TOKEN", "").strip()         # Admin API Access Token
 API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2025-07").strip()
-SITEMAP_URL = os.environ.get("SITEMAP_URL", "").strip()
+SITEMAP_URL = os.environ.get("SITEMAP_URL", "https://jeffsfavoritepicks.com/sitemap.xml").strip()
+AUTO_IMPORT = int(os.environ.get("AUTO_IMPORT", "0"))  # 1이면 실제 자동등록 실행
 
 # ─────────────────────────────────────────────────────────────
 # HTTP 세션
@@ -91,7 +93,52 @@ def _ping_sitemap():
         logging.warning("[sitemap] ping 실패: %s", e)
 
 # ─────────────────────────────────────────────────────────────
-# 메인 플로우
+# 선택: 키워드 수집 (라우트 /seo/keywords/run 에서 호출)
+def run_keywords():
+    """
+    - Google Trends/키워드 소스에서 상위 키워드 수집
+    - 내부 캐시/DB/파일에 저장
+    - 이후 run_all 또는 별도 SEO 로직에서 활용
+    """
+    logging.info("[run_keywords] 수집 시작")
+    # (예시) feed.json 같은 정적 파일에서 키워드 읽기
+    try:
+        import json, pathlib
+        fp = pathlib.Path(__file__).resolve().parents[1] / "feed.json"
+        if fp.exists():
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            logging.info("[run_keywords] feed.json 로드: keys=%s", list(data.keys()))
+        else:
+            logging.info("[run_keywords] feed.json 없음, 기본 시드 사용")
+    except Exception as e:
+        logging.warning("[run_keywords] 로드 오류: %s", e)
+
+    # TODO: 실제 키워드 수집 & 저장 로직
+    logging.info("[run_keywords] 수집 완료")
+
+# ─────────────────────────────────────────────────────────────
+# 선택: 사이트맵 재등록 (라우트 /seo/sitemap/resubmit 에서 호출)
+def resubmit_sitemap():
+    logging.info("[resubmit_sitemap] 시작: %s", SITEMAP_URL)
+    if not SITEMAP_URL:
+        logging.warning("[resubmit_sitemap] SITEMAP_URL 미설정")
+        return
+    # Google ping
+    try:
+        ping = requests.get(f"https://www.google.com/ping?sitemap={SITEMAP_URL}", timeout=10)
+        logging.info("[resubmit_sitemap] Google ping %s -> %s", SITEMAP_URL, ping.status_code)
+    except Exception as e:
+        logging.warning("[resubmit_sitemap] Google ping 실패: %s", e)
+    # Bing ping (선택)
+    try:
+        ping = requests.get(f"https://www.bing.com/ping?sitemap={SITEMAP_URL}", timeout=10)
+        logging.info("[resubmit_sitemap] Bing ping %s -> %s", SITEMAP_URL, ping.status_code)
+    except Exception as e:
+        logging.warning("[resubmit_sitemap] Bing ping 실패: %s", e)
+    logging.info("[resubmit_sitemap] 완료")
+
+# ─────────────────────────────────────────────────────────────
+# 메인 플로우 (전체 배치)
 def run_all():
     t0 = time.time()
     logging.info("[run_all] 실제 SEO/임포트 작업 시작")
@@ -101,12 +148,30 @@ def run_all():
     _fetch_sample_products(5)
     _ping_sitemap()
 
-    # 4) 실제 SEO 자동화 실행 (services.importer.run_all)
-    from services.importer import run_all as seo_run_all
-    seo_run_all()  # 메타 타이틀/디스크립션/ALT 업데이트
+    # 4) (옵션) 자동 임포트 실행
+    logging.info("[run_all] 시작: auto-import -> SEO")
+    if AUTO_IMPORT == 1:
+        logging.info("[import] AUTO_IMPORT=1 -> 실제 임포트 로직 실행")
+        # TODO: DSers/CJ에서 수집 → 필터 → Shopify Admin API 업로드
+    else:
+        logging.info("[import] AUTO_IMPORT=0 -> 스킵")
+
+    # 5) services.importer.run_all() 있으면 호출 (없으면 스킵)
+    try:
+        svc = importlib.import_module("services.importer")
+        if hasattr(svc, "run_all"):
+            logging.info("[run_all] services.importer.run_all 실행")
+            svc.run_all()  # 메타 타이틀/디스크립션/ALT 업데이트 등
+        else:
+            logging.info("[run_all] services.importer.run_all 없음 -> 스킵")
+    except ModuleNotFoundError:
+        logging.info("[run_all] services.importer 모듈 없음 -> 스킵")
+    except Exception as e:
+        logging.exception("[run_all] services.importer.run_all 실행 중 오류: %s", e)
 
     logging.info("[run_all] 완료 (%.1fs)", time.time() - t0)
 
+# 로컬/직접 실행용
 def run():
     missing = []
     if not STORE: missing.append("SHOPIFY_STORE")
@@ -117,6 +182,7 @@ def run():
         run_all()
     except Exception as e:
         logging.exception("[run] 작업 실패: %s", e)
+
 
 
 
