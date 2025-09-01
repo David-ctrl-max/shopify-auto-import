@@ -137,9 +137,7 @@ def register():
     Thread(target=run_import_and_seo, daemon=True).start()
     return jsonify({"ok": True, "status": "queued"}), 202
 
-# ─────────────────────────────────────────────────────────────
 # 추가 라우트: SEO 전체 실행 (/run-seo)
-# ─────────────────────────────────────────────────────────────
 @app.get("/run-seo")
 def run_seo():
     if not _authorized():
@@ -147,31 +145,12 @@ def run_seo():
     Thread(target=run_import_and_seo, daemon=True).start()
     return jsonify({"ok": True, "status": "queued", "job": "run_seo"}), 202
 
-# ─────────────────────────────────────────────────────────────
-# 별칭 라우트: /seo/run  (GET/POST 모두 허용, 트레일링 슬래시 대응)
-# ─────────────────────────────────────────────────────────────
-@app.route("/seo/run", methods=["GET", "POST"])
-@app.route("/seo/run/", methods=["GET", "POST"])
-def seo_run_alias():
-    if not _authorized():
-        return jsonify({"error": "Unauthorized"}), 401
-    Thread(target=run_import_and_seo, daemon=True).start()
-    return jsonify({"ok": True, "status": "queued", "job": "seo_run"}), 202
-
-# ─────────────────────────────────────────────────────────────
-# 추가 라우트: 키워드 수집 (/seo/keywords/run)
-#  - 있으면 jobs.importer.run_keywords() 우선 호출
-#  - 없으면 services.importer.run_keywords() 시도
-#  - 둘 다 없으면 폴백 데모 실행
-# ─────────────────────────────────────────────────────────────
+# 키워드 수집 더미 (구조 유지용)
 def _run_keywords_job():
-    # ① 신규 경로
     if _run_with("jobs.importer", "run_keywords"):
         return True
-    # ② 구(호환) 경로
     if _run_with("services.importer", "run_keywords"):
         return True
-    # ③ 폴백
     _fallback_demo_job()
     return True
 
@@ -182,18 +161,12 @@ def keywords_run():
     Thread(target=_run_keywords_job, daemon=True).start()
     return jsonify({"ok": True, "status": "queued", "job": "keywords"}), 202
 
-# ─────────────────────────────────────────────────────────────
-# 추가 라우트: 사이트맵 재등록 (/seo/sitemap/resubmit)
-#  - 있으면 jobs.importer.resubmit_sitemap() 우선 호출
-#  - 없으면 services.importer.resubmit_sitemap() 시도
-#  - 둘 다 없으면 SITEMAP_URL만 로그로 남기는 폴백
-# ─────────────────────────────────────────────────────────────
+# 사이트맵 재등록 더미 (구조 유지용)
 def _resubmit_sitemap_job():
     if _run_with("jobs.importer", "resubmit_sitemap"):
         return True
     if _run_with("services.importer", "resubmit_sitemap"):
         return True
-    # 폴백: 단순 로그 + 데모
     url = os.environ.get("SITEMAP_URL", "")
     logging.info("[fallback] resubmit_sitemap: SITEMAP_URL=%s", url or "(미지정)")
     _fallback_demo_job()
@@ -209,6 +182,7 @@ def sitemap_resubmit():
 # Render 로컬 실행 방지(서비스 환경에선 gunicorn이 실행)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
