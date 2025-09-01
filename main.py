@@ -148,6 +148,17 @@ def run_seo():
     return jsonify({"ok": True, "status": "queued", "job": "run_seo"}), 202
 
 # ─────────────────────────────────────────────────────────────
+# 별칭 라우트: /seo/run  (GET/POST 모두 허용, 트레일링 슬래시 대응)
+# ─────────────────────────────────────────────────────────────
+@app.route("/seo/run", methods=["GET", "POST"])
+@app.route("/seo/run/", methods=["GET", "POST"])
+def seo_run_alias():
+    if not _authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    Thread(target=run_import_and_seo, daemon=True).start()
+    return jsonify({"ok": True, "status": "queued", "job": "seo_run"}), 202
+
+# ─────────────────────────────────────────────────────────────
 # 추가 라우트: 키워드 수집 (/seo/keywords/run)
 #  - 있으면 jobs.importer.run_keywords() 우선 호출
 #  - 없으면 services.importer.run_keywords() 시도
@@ -198,6 +209,7 @@ def sitemap_resubmit():
 # Render 로컬 실행 방지(서비스 환경에선 gunicorn이 실행)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
