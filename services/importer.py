@@ -1,32 +1,18 @@
-# services/importer.py — Auto-Import + SEO with Round-Robin batching + lock + sitemap autodetect
+# services/importer.py — Auto-Import + SEO with Round-Robin batching + lock + sitemap autodetect + daily report
 # -*- coding: utf-8 -*-
 """
-run_all()가 실행되면 순서:
+run_all() 실행 순서:
   0) (옵션) AUTO IMPORT: PRODUCT_FEED_URL에서 후보를 불러와 상품 생성
   1) SEO UPDATE: 상품 목록을 가져와 meta title/description, image ALT (옵션: handle) 업데이트
   2) (부가) 사이트맵 핑 전송(자동 주소 감지)
+  3) (추가) 리포트 저장: /report/add 호출 (updated=이번 실행에 실제 적용된 SEO 건수)
 
 환경변수:
-  SHOPIFY_STORE              (예: bj0b8k-kg)   [필수]
-  SHOPIFY_ADMIN_TOKEN        (Admin API 토큰)   [필수]
-  SHOPIFY_API_VERSION        (기본: 2025-07)
-  USER_AGENT                 (기본: shopify-auto-import/1.0)
-
-  AUTO_IMPORT                ("1"이면 임포트 실행)
-  PRODUCT_FEED_URL           (임포트용 JSON feed URL)
-  MIN_PRICE                  (기본: 2)
-
-  SEO_LIMIT                  (이번 실행에서 처리할 상품 수 상한; 0=무제한)
-  SEO_UPDATE_HANDLE          ("1"이면 product handle도 갱신)
-  UPDATE_ALL_IMAGES_ALT      ("1"이면 모든 이미지 ALT 갱신; 기본은 첫 이미지 ALT만)
-
-  SEO_CURSOR_PATH            (라운드로빈 커서 저장 파일 경로; 기본: /data/seo_cursor.json → 실패 시 /tmp 폴백)
-  SITEMAP_URL                (명시적 sitemap URL; 실패 시 자동 감지 재시도)
-  IMPORT_AUTH_TOKEN          (엔드포인트 보호 토큰; main.py에서 사용)
-
-추가 개선:
-  - 중복 실행 방지: 간단 락 파일(/tmp/seo.lock)
-  - 사이트맵 자동 감지: SITEMAP_URL 없거나 404면 myshopify → 커스텀 도메인 순 재시도
+  SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, SHOPIFY_API_VERSION, USER_AGENT
+  AUTO_IMPORT, PRODUCT_FEED_URL, MIN_PRICE
+  SEO_LIMIT, SEO_UPDATE_HANDLE, UPDATE_ALL_IMAGES_ALT
+  SEO_CURSOR_PATH, SITEMAP_URL
+  IMPORT_AUTH_TOKEN, PUBLIC_BASE_URL
 """
 
 from __future__ import annotations
@@ -60,20 +46,23 @@ except Exception:
 
 # SEO flags
 try:
-    SEO_LIMIT = int(os.getenv("SEO_LIMIT", "10").strip() or 10)  # 기본 10으로 운영
+    SEO_LIMIT = int(os.getenv("SEO_LIMIT", "10").strip() or 10)  # 기본 10
 except Exception:
     SEO_LIMIT = 10
 SEO_UPDATE_HANDLE = os.getenv("SEO_UPDATE_HANDLE", "0").strip() == "1"
 UPDATE_ALL_IMAGES_ALT = os.getenv("UPDATE_ALL_IMAGES_ALT", "0").strip() == "1"
 
-# Round-robin cursor file (영구경로 선호)
+# Round-robin cursor file
 _default_cursor = Path("/data/seo_cursor.json")
 SEO_CURSOR_PATH = Path(os.getenv("SEO_CURSOR_PATH", str(_default_cursor)))
 if not SEO_CURSOR_PATH.parent.exists():
-    # Render 퍼시스턴트 디스크가 없거나 권한 없을 때 /tmp로 폴백
     SEO_CURSOR_PATH = Path("/tmp/seo_cursor.json")
 
 SITEMAP_URL_ENV = os.getenv("SITEMAP_URL", "").strip()
+
+# /report/add 제출용
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://shopify-auto-import.onrender.com").strip()
+IMPORT_AUTH_TOKEN = os.getenv("IMPORT_AUTH_TOKEN", os.getenv("AUTH_TOKEN", "jeffshopsecure")).strip()
 
 if not STORE:
     raise RuntimeError("환경변수 SHOPIFY_STORE 누락 (예: bj0b8k-kg)")
@@ -114,7 +103,7 @@ def _retry(func, *a, **k) -> requests.Response:
             continue
     if isinstance(last, requests.Response):
         return last
-    raise RuntimeError("HTTP 요청 재시도 후 실패") from last  # type: ignore[arg-type]
+    raise RuntimeError("HTTP 요청 재시도 후 실패") from last
 
 def _get(url: str, **kw) -> requests.Response:
     return _retry(SESSION.get, url, **kw)
@@ -138,7 +127,6 @@ class RunLock:
                 if age < 20 * 60:
                     raise RuntimeError("이미 실행 중으로 판단(락 존재)")
                 else:
-                    # 오래된 락은 청소
                     LOCK_PATH.unlink(missing_ok=True)
             LOCK_PATH.write_text(str(int(time.time())), encoding="utf-8")
         except Exception as e:
@@ -455,41 +443,66 @@ def resubmit_sitemap() -> None:
     # 2) myshopify 기본
     candidates.append(f"https://{STORE}.myshopify.com/sitemap.xml")
 
-    # 3) 흔한 커스텀 도메인(운영중 도메인으로 교체)
-    # 실제 상점의 도메인이라면 여기 문자열만 교체하세요.
+    # 3) 운영 도메인(필요 시 교체)
     candidates.append("https://jeffsfavoritepicks.com/sitemap.xml")
 
     used = None
     for url in candidates:
         code = _http_head_or_get(url)
-        if code and 200 <= code < 500:  # 404 포함: 그래도 핑 시도 로그 남김
+        if code and 200 <= code < 500:  # 404 포함: 그래도 핑 시도
             used = url
             status = _ping_google(url)
             log.info("[sitemap] Google ping %s (%s)", url, status)
             break
 
     if not used:
-        # 아무 것도 안되면 마지막 후보로라도 로그
         last = candidates[-1] if candidates else "(없음)"
         log.info("[sitemap] 유효 URL 찾지 못함, 마지막 후보 로그만: %s", last)
 
 # ─────────────────────────────────────────────────────────────
+# Report helper
+
+def _submit_daily_report(updated:int, dry:bool, limit:int,
+                         perf=0, acc=0, bp=0, seo=0, lcp=0.0, tbt=0, ctr=0.0, notes=""):
+    """main.py의 /report/add 엔드포인트로 간단 기록(업데이트 건수 등)을 남깁니다."""
+    try:
+        params = {
+            "auth": IMPORT_AUTH_TOKEN,
+            "perf": perf, "acc": acc, "bp": bp, "seo": seo,
+            "lcp": lcp, "tbt": tbt, "ctr": ctr,
+            "updated": updated,
+            "notes": notes or f"dry={dry}, limit={limit}"
+        }
+        requests.get(f"{PUBLIC_BASE_URL}/report/add", params=params, timeout=8)
+    except Exception as e:
+        log.warning("[report] submit failed: %s", e)
+
+# ─────────────────────────────────────────────────────────────
 # Public entrypoint
 
-def run_all() -> Dict[str, int]:
-    """Runs auto-import first (if enabled), then SEO updates, then sitemap ping."""
-    # 중복 실행 방지
+def run_all(*args, **kwargs) -> Dict[str, int]:
+    """
+    외부에서 kwargs로 dry/limit을 넘길 수 있습니다.
+      - dry (bool): 실제 업데이트 수행 여부(로깅/리스트만). 기본 False
+      - limit (int): 이번 실행 처리 수 상한(기본은 환경변수 SEO_LIMIT)
+    """
+    dry: bool = bool(kwargs.get("dry", False))
+    limit_kw = kwargs.get("limit", None)
+    try:
+        limit: int = int(limit_kw) if limit_kw is not None else SEO_LIMIT
+    except Exception:
+        limit = SEO_LIMIT
+
     with RunLock():
         t0 = time.time()
 
-        # 연결 점검 + 샘플 로그(가독성 유지용)
+        # 연결 점검 + 샘플 로그
         try:
             r = _get(f"{BASE}/shop.json")
             if r.status_code in (200, 201):
                 shop = r.json().get("shop", {}) or {}
                 log.info("[check] 연결 OK: shop=%s, myshopify=%s, api_version=%s",
                          shop.get("name"), shop.get("myshopify_domain"), API_VERSION)
-                # 샘플 출력(5개)
                 r2 = _get(f"{BASE}/products.json", params={"limit": 5})
                 if r2.status_code in (200, 201):
                     prods = r2.json().get("products", []) or []
@@ -508,10 +521,7 @@ def run_all() -> Dict[str, int]:
             log.exception("[run_all] run_auto_import 실패: %s", e)
 
         # 1) SEO UPDATE
-        if SEO_LIMIT and SEO_LIMIT > 0:
-            products = list_products_round_robin(SEO_LIMIT)
-        else:
-            products = list_all_products()
+        products = list_products_round_robin(limit) if (limit and limit > 0) else list_all_products()
 
         updated = skipped = errors = 0
 
@@ -520,6 +530,11 @@ def run_all() -> Dict[str, int]:
                 status = p.get("status")
                 if status not in ("active", "draft"):
                     skipped += 1
+                    continue
+
+                if dry:
+                    # 드라이 모드: 실제 업데이트는 건너뛰고 집계만
+                    updated += 1
                     continue
 
                 seo = make_seo(p)
@@ -542,8 +557,12 @@ def run_all() -> Dict[str, int]:
         except Exception:
             pass
 
+        # 3) DAILY REPORT 기록
+        _submit_daily_report(updated=updated, dry=dry, limit=limit)
+
         log.info("[run_all] 완료 (%.1fs)", time.time() - t0)
         return {"updated_seo": updated, "skipped": skipped, "errors": errors}
+
 
 
 
