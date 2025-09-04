@@ -5,6 +5,7 @@ from threading import Thread
 from urllib.parse import quote
 from flask import Flask, jsonify, request, Response, render_template_string
 import requests
+from datetime import timezone, timedelta
 
 # ─────────────────────────────────────────────────────────────
 # 인증 토큰 (통일: IMPORT_AUTH_TOKEN, 기본값 jeffshopsecure)
@@ -76,6 +77,11 @@ def _quickchart_url(labels, values, label="CTR %"):
         "options": {"plugins": {"legend": {"display": False}}},
     }
     return f"https://quickchart.io/chart?c={quote(json.dumps(cfg, separators=(',',':')))}"
+
+def _iso(dt: datetime.datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
 
 # ─────────────────────────────────────────────────────────────
 # Flask
@@ -262,39 +268,77 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #e5e5e5;padd
     return Response(html, mimetype="text/html")
 
 # ─────────────────────────────────────────────────────────────
-# SEO/임포트 실행부 (원형 유지)
+# SEO/임포트 실행부
 # ─────────────────────────────────────────────────────────────
+LAST_RUN_TS: datetime.datetime | None = None  # 마지막 수동/스케줄 실행 시작 시각(UTC)
+
 def _fallback_demo_job():
     logging.info("[fallback] SEO/임포트 작업 시작")
     for s in ["키워드 수집", "메타 생성", "이미지 ALT 점검", "사이트맵 제출"]:
         logging.info("[fallback] %s", s); time.sleep(0.2)
     logging.info("[fallback] SEO/임포트 작업 완료")
 
-def _run_with(import_path: str, func_name: str = "run_all") -> bool:
-    logging.info("외부 모듈 실행 시도: %s.%s()", import_path, func_name)
+def _run_with(import_path: str, func_name: str = "run_all", **kwargs) -> bool:
+    logging.info("외부 모듈 실행 시도: %s.%s(%s)", import_path, func_name, kwargs)
     try:
-        mod = importlib.import_module(import_path); fn = getattr(mod, func_name); fn(); return True
+        mod = importlib.import_module(import_path)
+        fn = getattr(mod, func_name)
+        try:
+            fn(**kwargs)  # kwargs 지원하는 구현이면 사용
+        except TypeError:
+            fn()          # 아니면 기본 호출
+        return True
     except Exception as e:
-        logging.warning("실패: %s.%s (%s)", import_path, func_name, e); return False
+        logging.warning("실패: %s.%s (%s)", import_path, func_name, e)
+        return False
 
-def run_import_and_seo():
+def run_import_and_seo(**kwargs):
+    global LAST_RUN_TS
+    LAST_RUN_TS = datetime.datetime.utcnow()
     logging.info("SEO 배치 작업 시작")
-    if _run_with("jobs.importer", "run_all"): return
-    if _run_with("services.importer", "run_all"): return
+    if _run_with("jobs.importer", "run_all", **kwargs): return
+    if _run_with("services.importer", "run_all", **kwargs): return
     _fallback_demo_job()
 
+# 실행 트리거 (기존)
 @app.get("/register")
 def register():
     if not _authorized(): return _unauth()
     Thread(target=run_import_and_seo, daemon=True).start()
     return jsonify({"ok": True, "status": "queued"}), 202
 
+# 실행 트리거 (파라미터 지원)
 @app.get("/run-seo")
 def run_seo():
     if not _authorized(): return _unauth()
-    Thread(target=run_import_and_seo, daemon=True).start()
-    return jsonify({"ok": True, "status": "queued", "job": "run_seo"}), 202
+    dry = request.args.get("dry", "0") == "1"
+    try:
+        limit = int(request.args.get("limit", 10))
+    except:
+        limit = 10
+    Thread(target=run_import_and_seo, kwargs={"dry": dry, "limit": limit}, daemon=True).start()
+    return jsonify({"ok": True, "status": "queued", "job": "run_seo", "dry": dry, "limit": limit}), 202
 
+# ── 별칭 라우트: /seo/run?dry=1&limit=10 ─────────────────────
+@app.get("/seo/run")
+def seo_run_alias():
+    if not _authorized(): return _unauth()
+    dry = request.args.get("dry", "0") == "1"
+    try:
+        limit = int(request.args.get("limit", 10))
+    except:
+        limit = 10
+    Thread(target=run_import_and_seo, kwargs={"dry": dry, "limit": limit}, daemon=True).start()
+    return jsonify({"ok": True, "status": "queued", "job": "seo_run", "dry": dry, "limit": limit}), 202
+
+# 히스토리 별칭
+@app.get("/seo/history")
+def seo_history_alias():
+    if not _authorized(): return _unauth()
+    limit = int(request.args.get("limit", 30))
+    return jsonify({"ok": True, "rows": _load_rows(limit=limit)})
+
+# 키워드/사이트맵(데모)
 @app.get("/seo/keywords/run")
 def keywords_run():
     if not _authorized(): return _unauth()
@@ -304,6 +348,7 @@ def keywords_run():
 @app.get("/seo/sitemap/resubmit")
 def sitemap_resubmit():
     if not _authorized(): return _unauth()
+    # 참고: Google sitemap ping은 중단됨. GSC 제출 유지 권장.
     Thread(target=_fallback_demo_job, daemon=True).start()
     return jsonify({"ok": True, "status": "queued", "job": "sitemap_resubmit"}), 202
 
@@ -380,10 +425,70 @@ def inventory_sync():
     return jsonify({"ok": True, "updated": updated, "errors": errors})
 
 # ─────────────────────────────────────────────────────────────
-# 실행
+# 최근/마지막 실행 제품 조회 (SEO 적용 상품 확인용)
+# ─────────────────────────────────────────────────────────────
+@app.get("/report/recent-products")
+def report_recent_products():
+    """최근 N분 내에 업데이트된 상품(SEO 메타 포함) 목록"""
+    if not _authorized(): return _unauth()
+    try:
+        minutes = int(request.args.get("minutes", 120))   # 기본 120분
+        limit   = int(request.args.get("limit", 50))      # 기본 50개
+    except:
+        minutes, limit = 120, 50
+
+    since = datetime.datetime.utcnow() - timedelta(minutes=minutes)
+    params = {"limit": 250, "updated_at_min": _iso(since)}
+    try:
+        res = _api_get("/products.json", params=params)
+        items = []
+        for p in res.get("products", [])[:limit]:
+            items.append({
+                "id": p.get("id"),
+                "title": p.get("title"),
+                "handle": p.get("handle"),
+                "updated_at": p.get("updated_at"),
+                "seo_title": p.get("metafields_global_title_tag"),
+                "seo_description": p.get("metafields_global_description_tag"),
+                "admin_url": f"https://admin.shopify.com/store/{SHOP}/products/{p.get('id')}"
+            })
+        return jsonify({"ok": True, "since": _iso(since), "count": len(items), "items": items})
+    except Exception as e:
+        logging.exception("report_recent_products error")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.get("/report/last-run-products")
+def report_last_run_products():
+    if not _authorized(): return _unauth()
+    if not LAST_RUN_TS:
+        return jsonify({"ok": False, "error": "no_last_run_timestamp"}), 400
+    since = LAST_RUN_TS - timedelta(minutes=2)  # 안전 버퍼
+    params = {"limit": 250, "updated_at_min": _iso(since)}
+    try:
+        res = _api_get("/products.json", params=params)
+        items = []
+        for p in res.get("products", []):
+            items.append({
+                "id": p.get("id"),
+                "title": p.get("title"),
+                "handle": p.get("handle"),
+                "updated_at": p.get("updated_at"),
+                "seo_title": p.get("metafields_global_title_tag"),
+                "seo_description": p.get("metafields_global_description_tag"),
+                "admin_url": f"https://admin.shopify.com/store/{SHOP}/products/{p.get('id')}"
+            })
+        return jsonify({"ok": True, "last_run_ts": _iso(LAST_RUN_TS), "count": len(items), "items": items})
+    except Exception as e:
+        logging.exception("report_last_run_products error")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ─────────────────────────────────────────────────────────────
+# 실행 (로컬 실행 시)
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+
 
 
 
