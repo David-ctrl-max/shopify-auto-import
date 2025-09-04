@@ -1,4 +1,4 @@
-# services/importer.py — Auto-Import + SEO with Round-Robin batching + lock + sitemap autodetect + daily report
+# services/importer.py — Auto-Import + SEO with Round-Robin batching + lock + sitemap autodetect + daily report + no-change skip
 # -*- coding: utf-8 -*-
 """
 run_all() 실행 순서:
@@ -13,6 +13,7 @@ run_all() 실행 순서:
   SEO_LIMIT, SEO_UPDATE_HANDLE, UPDATE_ALL_IMAGES_ALT
   SEO_CURSOR_PATH, SITEMAP_URL
   IMPORT_AUTH_TOKEN, PUBLIC_BASE_URL
+  OVERWRITE_ALWAYS              ← 동일값이어도 강제 덮어쓰기(기본 0=스킵)
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import re
 import time
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 
 import requests
@@ -51,6 +52,7 @@ except Exception:
     SEO_LIMIT = 10
 SEO_UPDATE_HANDLE = os.getenv("SEO_UPDATE_HANDLE", "0").strip() == "1"
 UPDATE_ALL_IMAGES_ALT = os.getenv("UPDATE_ALL_IMAGES_ALT", "0").strip() == "1"
+OVERWRITE_ALWAYS = os.getenv("OVERWRITE_ALWAYS", "0").strip() == "1"  # True면 항상 덮어쓰기
 
 # Round-robin cursor file
 _default_cursor = Path("/data/seo_cursor.json")
@@ -255,7 +257,58 @@ def make_seo(product: Dict[str, Any]) -> Dict[str, str]:
         "alt_text": alt,
     }
 
-def update_product_seo(p: Dict[str, Any], seo: Dict[str, str]) -> bool:
+def needs_update(product: Dict[str, Any], seo: Dict[str, str]) -> Tuple[bool, str]:
+    """
+    현재 상품에 계산된 SEO 적용이 필요한지 비교.
+    - handle(옵션), meta title/description, 대표 이미지 ALT(또는 전체 ALT) 비교
+    - 다르면 (True, 이유), 같으면 (False, "nochange")
+    """
+    # 메타 비교
+    cur_title = (product.get("metafields_global_title_tag") or "").strip()
+    cur_desc  = (product.get("metafields_global_description_tag") or "").strip()
+    new_title = seo["metafields_global_title_tag"].strip()
+    new_desc  = seo["metafields_global_description_tag"].strip()
+
+    if cur_title != new_title:
+        return True, "title_diff"
+    if cur_desc != new_desc:
+        return True, "desc_diff"
+
+    if SEO_UPDATE_HANDLE:
+        cur_handle = (product.get("handle") or "").strip()
+        if cur_handle != (seo["handle"] or "").strip():
+            return True, "handle_diff"
+
+    # 이미지 ALT 비교
+    imgs = product.get("images") or []
+    new_alt = seo["alt_text"].strip()
+
+    if not imgs:
+        return False, "nochange"
+
+    if UPDATE_ALL_IMAGES_ALT:
+        for img in imgs:
+            if (img.get("alt") or "").strip() != new_alt:
+                return True, "alt_diff_all"
+        return False, "nochange"
+    else:
+        first = imgs[0]
+        if (first.get("alt") or "").strip() != new_alt:
+            return True, "alt_diff_first"
+        return False, "nochange"
+
+def update_product_seo(p: Dict[str, Any], seo: Dict[str, str]) -> Tuple[bool, str]:
+    """
+    변경이 필요할 때만 Shopify에 PUT 호출.
+    반환: (True/False, reason)  True면 실제 업데이트 수행됨.
+    """
+    if not OVERWRITE_ALWAYS:
+        need, why = needs_update(p, seo)
+        if not need:
+            return False, "nochange"
+    else:
+        why = "force"
+
     pid = p["id"]
     payload = {"product": {
         "id": pid,
@@ -282,9 +335,12 @@ def update_product_seo(p: Dict[str, Any], seo: Dict[str, str]) -> bool:
             if img_id:
                 r2 = _put(f"{BASE}/products/{pid}/images/{img_id}.json",
                           json={"image": {"id": img_id, "alt": seo["alt_text"]}})
-                ok2 = r2.status_code in (200, 201)
+                ok2 = ok2 and (r2.status_code in (200, 201))
 
-    return ok1 and ok2
+    if ok1 and ok2:
+        return True, why
+    else:
+        return False, "api_fail"
 
 # ─────────────────────────────────────────────────────────────
 # AUTO IMPORT (옵션)
@@ -483,7 +539,7 @@ def _submit_daily_report(updated:int, dry:bool, limit:int,
 def run_all(*args, **kwargs) -> Dict[str, int]:
     """
     외부에서 kwargs로 dry/limit을 넘길 수 있습니다.
-      - dry (bool): 실제 업데이트 수행 여부(로깅/리스트만). 기본 False
+      - dry (bool): 실제 업데이트 수행 여부(로깅/시뮬레이션만). 기본 False
       - limit (int): 이번 실행 처리 수 상한(기본은 환경변수 SEO_LIMIT)
     """
     dry: bool = bool(kwargs.get("dry", False))
@@ -524,6 +580,7 @@ def run_all(*args, **kwargs) -> Dict[str, int]:
         products = list_products_round_robin(limit) if (limit and limit > 0) else list_all_products()
 
         updated = skipped = errors = 0
+        skipped_nochange = 0
 
         for p in products:
             try:
@@ -532,16 +589,31 @@ def run_all(*args, **kwargs) -> Dict[str, int]:
                     skipped += 1
                     continue
 
+                seo = make_seo(p)
+
                 if dry:
-                    # 드라이 모드: 실제 업데이트는 건너뛰고 집계만
-                    updated += 1
+                    # 드라이 모드: API 호출 없이 "적용 필요 여부"만 판단
+                    need, why = needs_update(p, seo) if not OVERWRITE_ALWAYS else (True, "force")
+                    if need:
+                        updated += 1
+                        log.info("[seo] (dry) would update pid=%s (%s)", p.get("id"), why)
+                    else:
+                        skipped_nochange += 1
+                        log.info("[seo] (dry) skip pid=%s (%s)", p.get("id"), "nochange")
                     continue
 
-                seo = make_seo(p)
-                if update_product_seo(p, seo):
+                # 실제 업데이트
+                did, reason = update_product_seo(p, seo)
+                if did:
                     updated += 1
+                    log.info("[seo] updated pid=%s (%s)", p.get("id"), reason)
                 else:
-                    errors += 1
+                    if reason == "nochange":
+                        skipped_nochange += 1
+                    else:
+                        errors += 1
+                    log.info("[seo] skip pid=%s (%s)", p.get("id"), reason)
+
             except Exception as e:
                 errors += 1
                 log.exception("[seo] failed pid=%s: %s", p.get("id"), e)
@@ -549,7 +621,8 @@ def run_all(*args, **kwargs) -> Dict[str, int]:
             # 너무 빠르면 429 가능성 → 소량 지연
             time.sleep(0.05)
 
-        log.info("[summary] updated_seo=%d, skipped=%d, errors=%d", updated, skipped, errors)
+        log.info("[summary] updated_seo=%d, skipped=%d, skipped_nochange=%d, errors=%d",
+                 updated, skipped, skipped_nochange, errors)
 
         # 2) SITEMAP PING (자동 감지)
         try:
@@ -557,11 +630,12 @@ def run_all(*args, **kwargs) -> Dict[str, int]:
         except Exception:
             pass
 
-        # 3) DAILY REPORT 기록
+        # 3) DAILY REPORT 기록 (드라이 모드면 '적용 필요 건수'를 기록)
         _submit_daily_report(updated=updated, dry=dry, limit=limit)
 
         log.info("[run_all] 완료 (%.1fs)", time.time() - t0)
-        return {"updated_seo": updated, "skipped": skipped, "errors": errors}
+        return {"updated_seo": updated, "skipped": skipped + skipped_nochange, "errors": errors}
+
 
 
 
