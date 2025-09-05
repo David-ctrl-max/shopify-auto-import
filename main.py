@@ -36,6 +36,7 @@ if ADMIN_TOKEN:
         "X-Shopify-Access-Token": ADMIN_TOKEN,
         "Content-Type": "application/json",
         "Accept": "application/json",
+#if Render adds gzip by default, fine
         "User-Agent": "shopify-auto-import/1.0",
     })
 
@@ -65,15 +66,19 @@ def _api_put(path, payload):
 
 # GraphQL (for metafield definition create fallback)
 def _gql(query: str, variables=None):
-    """Shopify Admin GraphQL 호출"""
+    """Shopify Admin GraphQL 호출 (에러시 바디 포함)"""
     if not SHOP:
         raise RuntimeError("SHOPIFY_STORE env is empty")
     url = f"https://{SHOP}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
     headers = S.headers.copy()
     headers["Content-Type"] = "application/json"
-    r = requests.post(url, headers=headers, json={"query": query, "variables": variables or {}}, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = requests.post(url, headers=headers, json={"query": query, "variables": variables or {}}, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except requests.HTTPError as he:
+        text = he.response.text if he.response is not None else ""
+        raise RuntimeError(f"graphql_http_error {he} body={text[:500]}")
 
 # ─────────────────────────────────────────────────────────────
 # 리포트 저장소
@@ -616,11 +621,13 @@ FAQ_KEY = "faq_json"
 
 def _ensure_faq_definition():
     """
-    custom.faq_json 메타필드 정의 존재 확인 → 없으면 GraphQL로 생성.
+    custom.faq_json 메타필드 정의 존재 확인 → 없으면 GraphQL로 생성 시도.
     (REST가 404/400/406을 줄 수 있어 단계적 탐색 + GraphQL 생성으로 대응)
+    실패/미지원이어도 제품 메타필드는 동작하므로, 최종적으로는 ok=True with 'skipped'를 반환.
     """
+    result = {"ok": False, "created": False, "definition": None, "mode": None, "tried": [], "skipped_reason": None}
     try:
-        # 1) 존재 여부를 REST로 느슨하게 탐색
+        # 1) REST로 존재 여부 탐색
         tries = [
             {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY, "owner_types[]": "product"},
             {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY},
@@ -628,20 +635,21 @@ def _ensure_faq_definition():
             {},
         ]
         for params in tries:
+            result["tried"].append({"rest_query": params})
             try:
                 data = _api_get("/metafield_definitions.json", params=params)
             except requests.HTTPError as he:
-                if he.response is not None and he.response.status_code in (404, 400, 406):
-                    continue
-                raise
+                # 정의 목록이 차단된 플랜/퍼미션/버전일 수 있음 → 계속 시도
+                continue
             defs = data.get("metafield_definitions", []) or []
             for d in defs:
                 if d.get("namespace") == FAQ_NAMESPACE and d.get("key") == FAQ_KEY:
                     ots = d.get("owner_types") or []
                     if not ots or "product" in ots:
-                        return {"ok": True, "created": False, "definition": d}
+                        result.update({"ok": True, "created": False, "definition": d, "mode": "rest-found"})
+                        return result
 
-        # 2) 없으면 GraphQL로 생성 시도
+        # 2) GraphQL로 생성 시도
         mutation = """
         mutation CreateDef($def: MetafieldDefinitionInput!) {
           metafieldDefinitionCreate(definition: $def) {
@@ -664,15 +672,22 @@ def _ensure_faq_definition():
         payload = gj.get("data", {}).get("metafieldDefinitionCreate", {}) if isinstance(gj, dict) else {}
         errs = (payload.get("userErrors") or [])
         if errs:
-            return {"ok": False, "error": "; ".join([e.get("message","") for e in errs])}
+            # 생성이 거부되더라도 제품 메타필드는 쓸 수 있으므로 skip 처리
+            result.update({"ok": True, "created": False, "definition": None, "mode": "gql-skip", "skipped_reason": "; ".join([e.get("message","") for e in errs])})
+            return result
         created = payload.get("createdDefinition")
         if created:
-            return {"ok": True, "created": True, "definition": created}
+            result.update({"ok": True, "created": True, "definition": created, "mode": "gql-create"})
+            return result
 
-        return {"ok": False, "error": "unknown_create_failure"}
+        # 그래도 없으면 '스킵'으로 성공
+        result.update({"ok": True, "created": False, "mode": "fallback-skip", "skipped_reason": "definition endpoints unavailable; product metafields still usable"})
+        return result
     except Exception as e:
         logging.exception("ensure_faq_definition error")
-        return {"ok": False, "error": str(e)}
+        # 예외가 나도 실패로 만들지 않고, 스킵 성공 처리
+        result.update({"ok": True, "created": False, "mode": "exception-skip", "skipped_reason": str(e)})
+        return result
 
 def _product_by_handle(handle: str):
     res = _api_get("/products.json", params={"handle": handle, "fields": "id,title,handle,status,published_at"})
@@ -752,8 +767,18 @@ def _set_product_faq_json(product_id: int, json_value: dict, dry_run=False):
 def faq_bootstrap():
     if not _authorized(): return _unauth()
     out = _ensure_faq_definition()
-    code = 200 if out.get("ok") else 500
-    return jsonify(out), code
+    # 항상 200 응답으로 진단정보 표시 (정의가 없어도 apply는 동작)
+    return jsonify(out), 200
+
+@app.get("/seo/faq/defs/debug")
+def faq_defs_debug():
+    """정의 조회가 가능한 환경이면 목록을 반환 (디버그용)"""
+    if not _authorized(): return _unauth()
+    try:
+        data = _api_get("/metafield_definitions.json", params={"namespace": FAQ_NAMESPACE})
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200  # 디버그용이므로 200
 
 @app.get("/seo/faq/apply")
 def faq_apply_dryrun():
@@ -765,10 +790,7 @@ def faq_apply_dryrun():
     limit = int(request.args.get("limit", 5))
     dry = (request.args.get("dry_run") or "true").lower() in ("1","true","yes")
 
-    boot = _ensure_faq_definition()
-    if not boot.get("ok"):
-        logging.warning("FAQ definition not ensured (continue anyway): %s", boot.get("error"))
-
+    boot = _ensure_faq_definition()  # 실패해도 ok True로 스킵 처리됨
     res = _api_get("/products.json", params={"limit": max(10, limit), "fields": "id,title,handle,status,published_at"})
     products = [p for p in res.get("products", []) if p.get("status")=="active" and p.get("published_at")][:limit]
     items = []
@@ -783,7 +805,7 @@ def faq_apply_dryrun():
             apply_res = _set_product_faq_json(int(p["id"]), faq, dry_run=False)
             items.append({"id": p["id"], "handle": p["handle"], **apply_res})
 
-    return jsonify({"ok": True, "count": len(items), "items": items, "dry_run": dry})
+    return jsonify({"ok": True, "bootstrap": boot, "count": len(items), "items": items, "dry_run": dry})
 
 @app.post("/seo/faq/apply")
 def faq_apply_post():
@@ -805,10 +827,7 @@ def faq_apply_post():
     if not items:
         return jsonify({"ok": False, "error": "empty_items"}), 400
 
-    boot = _ensure_faq_definition()
-    if not boot.get("ok"):
-        logging.warning("FAQ definition not ensured (continue anyway): %s", boot.get("error"))
-
+    boot = _ensure_faq_definition()  # 정의 없어도 진행
     results = []
     for it in items:
         try:
@@ -824,7 +843,7 @@ def faq_apply_post():
             logging.exception("faq_apply_post item error")
             results.append({"ok": False, "error": str(e), "item": it})
 
-    return jsonify({"ok": True, "dry_run": dry, "results": results})
+    return jsonify({"ok": True, "dry_run": dry, "bootstrap": boot, "results": results})
 
 @app.get("/seo/faq/preview")
 def faq_preview():
