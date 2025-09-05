@@ -3,7 +3,7 @@
 # - Dashboard & reports
 # - Inventory check/sync
 # - SEO runner aliases
-# - NEW: /sitemap-products.xml, /sitemap/ping, /seo/rewrite
+# - NEW: /sitemap-products.xml, /sitemap/ping, /seo/rewrite, /tests
 #
 # Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
 # Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
@@ -13,6 +13,8 @@ from threading import Thread
 from urllib.parse import quote
 from flask import Flask, jsonify, request, Response, render_template_string
 import requests
+
+print("[BOOT] importing main.py...")
 
 # ─────────────────────────────────────────────────────────────
 # 인증 토큰 (통일: IMPORT_AUTH_TOKEN, 기본값 jeffshopsecure)
@@ -63,10 +65,9 @@ HISTORY_FILE = REPORTS_DIR / "history.jsonl"
 def _append_row(row: dict):
     row["ts"] = datetime.datetime.utcnow().isoformat() + "Z"
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        # NOTE: Render deploy failed earlier due to a missing closing string. Keep this exactly as below.
+        # keep this EXACTLY like this (Render once failed due to missing closing string)
         f.write(json.dumps(row, ensure_ascii=False) + "
 ")
-    
 
 def _load_rows(limit=30):
     if not HISTORY_FILE.exists():
@@ -93,6 +94,7 @@ def _quickchart_url(labels, values, label="CTR %"):
 # ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 app = Flask(__name__)
+print("[BOOT] Flask app instantiated")
 
 def _authorized() -> bool:
     return (
@@ -143,6 +145,7 @@ DASH_HTML = """
 <div class="row">
   <button onclick="ping()">1) Shopify Ping</button>
   <button onclick="checkInventory()">2) 재고 현황</button>
+  <a href="/tests?auth=" id="testsLink">▶ Test Playground 열기</a>
 </div>
 
 <div class="card">
@@ -167,32 +170,21 @@ DASH_HTML = """
 
 <script>
 const AUTH = new URLSearchParams(location.search).get("auth") || "";
+document.getElementById('testsLink').href = '/tests?auth=' + encodeURIComponent(AUTH);
 function show(el, data){ document.getElementById(el).textContent = typeof data==="string" ? data : JSON.stringify(data,null,2); }
-
 async function api(path, opts={}){
   const q = path.includes("?") ? "&" : "?";
   const res = await fetch(path + q + "auth=" + encodeURIComponent(AUTH), opts);
   const txt = await res.text();
   try { return JSON.parse(txt); } catch { return txt; }
 }
-
-async function ping(){
-  const r = await api("/shopify/ping");
-  show("out", r);
-}
-async function checkInventory(){
-  const r = await api("/inventory/check");
-  show("out", r);
-}
+async function ping(){ const r = await api("/shopify/ping"); show("out", r); }
+async function checkInventory(){ const r = await api("/inventory/check"); show("out", r); }
 async function sync(){
   let arr = [];
   try { arr = JSON.parse(document.getElementById("syncPayload").value); }
   catch(e){ return show("syncOut", "JSON 파싱 오류: " + e); }
-  const r = await api("/inventory/sync", {
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({items:arr})
-  });
+  const r = await api("/inventory/sync", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({items:arr}) });
   show("syncOut", r);
 }
 </script>
@@ -417,7 +409,7 @@ def inventory_sync():
     return jsonify({"ok": True, "updated": updated, "errors": errors})
 
 # ─────────────────────────────────────────────────────────────
-# 최근 업데이트된 상품 조회 (시간 기반 / 마지막 실행 기반 / 실제 변경 기반)
+# 최근 업데이트된 상품 조회
 # ─────────────────────────────────────────────────────────────
 
 def _iso(dt):
@@ -616,39 +608,39 @@ TEST_HTML = """
 </style>
 <h1>SEO Test Playground</h1>
 <p>아래 버튼들은 명령행 <code>curl</code> 예제를 브라우저에서 쉽게 실행할 수 있도록 만든 테스트 도구입니다.</p>
-<div class="row">
-  <label>Base URL <input id="base" size="50" value="https://shopify-auto-import.onrender.com"></label>
-  <label>Auth <input id="auth" size="20" value="jeffshopsecure"></label>
+<div class=\"row\">
+  <label>Base URL <input id=\"base\" size=\"50\" value=\"https://shopify-auto-import.onrender.com\"></label>
+  <label>Auth <input id=\"auth\" size=\"20\" value=\"jeffshopsecure\"></label>
 </div>
-<div class="card">
+<div class=\"card\">
   <h3>1) 헬스체크</h3>
-  <button onclick="go('/health')">GET /health</button>
-  <pre id="out1"></pre>
+  <button onclick=\"go('/health')\">GET /health</button>
+  <pre id=\"out1\"></pre>
 </div>
-<div class="card">
+<div class=\"card\">
   <h3>2) 사이트맵 생성 확인</h3>
-  <button onclick="go('/sitemap-products.xml', 'GET', true)">GET /sitemap-products.xml?auth=...</button>
-  <pre id="out2"></pre>
+  <button onclick=\"go('/sitemap-products.xml', 'GET', true)\">GET /sitemap-products.xml?auth=...</button>
+  <pre id=\"out2\"></pre>
 </div>
-<div class="card">
+<div class=\"card\">
   <h3>3) Google 핑</h3>
-  <button onclick="go('/sitemap/ping', 'POST', true)">POST /sitemap/ping?auth=...</button>
-  <pre id="out3"></pre>
+  <button onclick=\"go('/sitemap/ping', 'POST', true)\">POST /sitemap/ping?auth=...</button>
+  <pre id=\"out3\"></pre>
 </div>
-<div class="card">
+<div class=\"card\">
   <h3>4) SEO 리라이트 (드라이런)</h3>
-  <button onclick="go('/seo/rewrite?limit=5&dry_run=true', 'POST', true)">POST /seo/rewrite?limit=5&dry_run=true&auth=...</button>
-  <pre id="out4"></pre>
+  <button onclick=\"go('/seo/rewrite?limit=5&dry_run=true', 'POST', true)\">POST /seo/rewrite?limit=5&dry_run=true&auth=...</button>
+  <pre id=\"out4\"></pre>
 </div>
-<div class="card">
+<div class=\"card\">
   <h3>5) SEO 리라이트 (실행)</h3>
-  <button onclick="go('/seo/rewrite?limit=5', 'POST', true)">POST /seo/rewrite?limit=5&auth=...</button>
-  <pre id="out5"></pre>
+  <button onclick=\"go('/seo/rewrite?limit=5', 'POST', true)\">POST /seo/rewrite?limit=5&auth=...</button>
+  <pre id=\"out5\"></pre>
 </div>
-<div class="card">
+<div class=\"card\">
   <h3>6) 배치 실행 별칭 (/register)</h3>
-  <button onclick="go('/register', 'GET', true)">GET /register?auth=...</button>
-  <pre id="out6"></pre>
+  <button onclick=\"go('/register', 'GET', true)\">GET /register?auth=...</button>
+  <pre id=\"out6\"></pre>
 </div>
 <script>
 function el(id){return document.getElementById(id)}
@@ -675,16 +667,18 @@ async function go(path, method='GET', needsAuth=false){
 
 @app.get("/tests")
 def tests_page():
-    # 인증 없이도 보이게 할 수 있지만, 여기서는 보호합니다.
     if not _authorized():
         return _unauth()
     return Response(TEST_HTML, mimetype="text/html")
 
+print("[BOOT] main.py loaded successfully")
+
 # ─────────────────────────────────────────────────────────────
-# 실행
+# 실행 (개발 로컬에서만 의미 있음; Render는 gunicorn이 사용)
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
