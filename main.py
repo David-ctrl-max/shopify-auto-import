@@ -3,12 +3,12 @@
 # - Dashboard & reports
 # - Inventory check/sync
 # - SEO runner aliases
-# - NEW: /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite, /tests
+# - NEW: /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite (GET+POST), /tests
 #
 # Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
 # Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
 
-import os, sys, time, json, pathlib, datetime, logging, importlib
+import os, sys, time, json, pathlib, datetime, logging, importlib, html
 from threading import Thread
 from urllib.parse import quote
 from flask import Flask, jsonify, request, Response, render_template_string
@@ -515,13 +515,13 @@ def sitemap_products():
             if imgs and imgs[0].get("src"):
                 image_tags = f"""
     <image:image>
-      <image:loc>{imgs[0]['src']}</image:loc>
-      <image:title>{p['handle']}</image:title>
+      <image:loc>{html.escape(imgs[0]['src'])}</image:loc>
+      <image:title>{html.escape(p['handle'])}</image:title>
     </image:image>"""
             items.append(f"""
   <url>
-    <loc>{loc}</loc>
-    <lastmod>{lastmod}</lastmod>{image_tags}
+    <loc>{html.escape(loc)}</loc>
+    <lastmod>{html.escape(lastmod)}</lastmod>{image_tags}
   </url>""")
         body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
@@ -551,15 +551,29 @@ def sitemap_ping():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ③: SEO Rewrite  — POST /seo/rewrite?limit=10&dry_run=true
+# NEW ③: SEO Rewrite  — GET/POST /seo/rewrite?limit=10&dry_run=true
+#  - GET 지원 추가: 브라우저/모니터링에서 405 방지
+#  - GET에서 dry_run 파라미터가 없으면 기본적으로 dry_run=true 처리(안전)
 # ─────────────────────────────────────────────────────────────
-@app.post("/seo/rewrite")
+@app.route("/seo/rewrite", methods=["GET", "POST"])
 def seo_rewrite():
     if not _authorized():
         return _unauth()
     try:
+        # limit 파싱
         limit = int(request.args.get("limit", 10))
-        dry = (request.args.get("dry_run") or "").lower() in ("1","true","yes")
+
+        # dry_run 파싱: GET이면 기본 true, POST는 명시 없으면 false
+        raw = (request.args.get("dry_run") or "").lower()
+        if request.method == "GET":
+            dry = True if raw == "" else raw in ("1","true","yes","y","on")
+        else:
+            dry = raw in ("1","true","yes","y","on")
+
+        # (선택) POST JSON 바디 수용
+        body = {}
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
 
         # 최근 활성 제품 가져오기 (필요시 페이지네이션 확장)
         res = _api_get("/products.json", params={"limit": max(10, limit), "fields": "id,title,handle,status,published_at"})
@@ -582,7 +596,15 @@ def seo_rewrite():
             rec = {"event": "seo_rewrite", "product_id": pid, "handle": p.get("handle"), "title": title_tag, "description": desc_tag}
             _append_row(rec)
             changed.append(rec)
-        return jsonify({"ok": True, "count": len(changed), "items": changed, "dry_run": dry})
+
+        return jsonify({
+            "ok": True,
+            "method": request.method,
+            "count": len(changed),
+            "items": changed,
+            "dry_run": dry,
+            "request_body": body if request.method == "POST" else {}
+        })
     except Exception as e:
         _append_row({"event": "seo_rewrite_error", "error": str(e)})
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -675,17 +697,3 @@ print("[BOOT] main.py loaded successfully")
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
