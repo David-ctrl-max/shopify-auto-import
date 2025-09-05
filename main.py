@@ -3,8 +3,8 @@
 # - Dashboard & reports
 # - Inventory check/sync
 # - SEO runner aliases
-# - NEW: /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite, /tests
-# - NEW(FAQ): /seo/faq/bootstrap, /seo/faq/apply, /seo/faq/preview
+# - NEW: /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite (GET+POST)
+# - NEW: FAQ JSON-LD bootstrap/apply/preview
 #
 # Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
 # Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
@@ -89,12 +89,13 @@ def _load_rows(limit=30):
     return out
 
 def _quickchart_url(labels, values, label="CTR %"):
+    from urllib.parse import quote as _q
     cfg = {
         "type": "line",
         "data": {"labels": labels, "datasets": [{"label": label, "data": values}]},
         "options": {"plugins": {"legend": {"display": False}}},
     }
-    return f"https://quickchart.io/chart?c={quote(json.dumps(cfg, separators=(',',':')))}"
+    return f"https://quickchart.io/chart?c={_q(json.dumps(cfg, separators=(',',':')))}"
 
 # ─────────────────────────────────────────────────────────────
 # Flask
@@ -421,7 +422,6 @@ def inventory_sync():
 def _iso(dt):
     if isinstance(dt, str):
         return dt
-        # keep input
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     return dt.isoformat().replace("+00:00", "Z")
@@ -561,17 +561,17 @@ def sitemap_ping():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ③: SEO Rewrite  — POST /seo/rewrite?limit=10&dry_run=true
+# NEW ③: SEO Rewrite  — GET/POST /seo/rewrite?limit=10&dry_run=true
 # ─────────────────────────────────────────────────────────────
-@app.post("/seo/rewrite")
+@app.route("/seo/rewrite", methods=["GET", "POST"])
 def seo_rewrite():
     if not _authorized():
         return _unauth()
     try:
+        # GET에서도 사용 가능하도록 query에서 읽음
         limit = int(request.args.get("limit", 10))
         dry = (request.args.get("dry_run") or "").lower() in ("1","true","yes")
 
-        # 최근 활성 제품 가져오기 (필요시 페이지네이션 확장)
         res = _api_get("/products.json", params={"limit": max(10, limit), "fields": "id,title,handle,status,published_at"})
         candidates = [p for p in res.get("products", []) if p.get("status") == "active" and p.get("published_at")]
         products = candidates[:limit]
@@ -598,207 +598,189 @@ def seo_rewrite():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ④: FAQ JSON-LD 메타필드 지원 (custom.faq_json)
+# NEW ④: FAQ JSON-LD 지원
+#   - 메타필드 정의 생성(custom.faq_json)
+#   - 제품에 FAQ JSON upsert
+#   - 미리보기
 # ─────────────────────────────────────────────────────────────
-
 FAQ_NAMESPACE = "custom"
 FAQ_KEY = "faq_json"
-FAQ_TYPE = "json"  # Shopify typed metafield
+FAQ_TYPE = "json"  # Shopify metafield type
 
 def _ensure_faq_definition():
-    """
-    custom.faq_json (type=json, owner_types=[product]) 메타필드 정의를 보장
-    """
+    """custom.faq_json 메타필드 정의가 없으면 생성"""
     try:
-        defs = _api_get("/metafield_definitions.json", params={"owner_types[]": "product"})
-        for d in defs.get("metafield_definitions", []):
-            if d.get("namespace") == FAQ_NAMESPACE and d.get("key") == FAQ_KEY and d.get("type") == FAQ_TYPE:
-                return {"ok": True, "created": False, "definition": d}
-    except Exception as e:
-        logging.warning("metafield_definitions list error: %s", e)
-
-    # 없으면 생성
-    try:
-        created = _api_post("/metafield_definitions.json", {
+        q = {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY, "owner_types[]": "product"}
+        exists = _api_get("/metafield_definitions.json", params=q).get("metafield_definitions", [])
+        if exists:
+            return {"ok": True, "created": False, "definition": exists[0]}
+        payload = {
             "metafield_definition": {
-                "name": "FAQ JSON-LD",
+                "name": "Product FAQ JSON",
                 "namespace": FAQ_NAMESPACE,
                 "key": FAQ_KEY,
                 "type": FAQ_TYPE,
-                "owner_types": ["product"],
-                "description": "Structured data (FAQPage) for product detail page"
+                "description": "Google FAQPage markup(JSON-LD) source for the product",
+                "owner_types": ["product"]
             }
-        })
-        return {"ok": True, "created": True, "definition": created.get("metafield_definition")}
+        }
+        created = _api_post("/metafield_definitions.json", payload).get("metafield_definition")
+        return {"ok": True, "created": True, "definition": created}
     except Exception as e:
-        logging.exception("create metafield_definition error")
+        logging.exception("ensure_faq_definition error")
         return {"ok": False, "error": str(e)}
 
-def _find_product_by_handle(handle: str):
-    res = _api_get("/products.json", params={"limit": 250, "fields": "id,handle,title,status,published_at"})
+def _product_map(limit=250):
+    """handle -> {id, handle, title} 매핑"""
+    res = _api_get("/products.json", params={"limit": limit, "fields": "id,handle,title,status,published_at"})
+    out = {}
     for p in res.get("products", []):
-        if p.get("handle") == handle:
-            return p
-    return None
+        out[p.get("handle")] = {"id": p.get("id"), "handle": p.get("handle"), "title": p.get("title")}
+    return out
 
-def _build_faq_jsonld(title: str, qas: list):
-    """
-    qas: list of [question, answer]
-    returns dict(JSON-LD)
-    """
-    main = []
-    for qa in qas:
-        if not qa or len(qa) < 2: 
-            continue
-        q, a = (qa[0] or "").strip(), (qa[1] or "").strip()
-        if not q or not a: 
-            continue
-        main.append({
-            "@type": "Question",
-            "name": q,
-            "acceptedAnswer": { "@type": "Answer", "text": a }
-        })
-    if not main:
-        # fallback default FAQ (generic)
-        main = [
-            {"@type":"Question","name":"배송은 얼마나 걸리나요?","acceptedAnswer":{"@type":"Answer","text":"평균 2–5 영업일 소요됩니다. 주문 후 추적 번호를 보내드립니다."}},
-            {"@type":"Question","name":"반품/교환은 가능한가요?","acceptedAnswer":{"@type":"Answer","text":"수령 후 14일 내 미사용/미개봉 시 무료 반품/교환을 도와드립니다."}},
-            {"@type":"Question","name":"품질 보증은 어떻게 되나요?","acceptedAnswer":{"@type":"Answer","text":"제품 수령 후 30일 내 초기 불량은 100% 교환/환불 보장합니다."}},
-            {"@type":"Question","name":"문의는 어디로 하나요?","acceptedAnswer":{"@type":"Answer","text":"실시간 채팅 또는 support@{shop}.myshopify.com 으로 연락주세요."}}
-        ]
-    data = {
-        "@context": "https://schema.org",
-        "@type": "FAQPage",
-        "name": f"FAQ – {title}",
-        "mainEntity": main
+def _qa_list_to_jsonld(qas):
+    """[['Q','A'], ...] -> JSON-LD dict"""
+    main_entity = [{"@type": "Question", "name": q, "acceptedAnswer": {"@type": "Answer", "text": a}} for q,a in qas]
+    return {
+        "@context":"https://schema.org",
+        "@type":"FAQPage",
+        "mainEntity": main_entity
     }
-    return data
 
-def _write_product_faq_metafield(product_id: int, faq_json: dict, dry: bool):
-    """
-    product 메타필드 (custom.faq_json) 쓰기
-    """
-    payload = {
-        "metafield": {
-            "namespace": FAQ_NAMESPACE,
-            "key": FAQ_KEY,
-            "type": FAQ_TYPE,
-            "owner_resource": "product",
-            "owner_id": product_id,
-            "value": faq_json
-        }
-    }
+def _upsert_product_faq(product_id: int, qas, dry=False):
+    """제품 메타필드 upsert. dry=True면 API 호출 없이 preview만 반환"""
+    value_obj = _qa_list_to_jsonld(qas)
     if dry:
-        return {"ok": True, "dry_run": True, "payload": payload}
-    # REST는 value를 JSON 직렬화 없이 받아줍니다(type=json). Shopify가 직렬화 처리.
-    res = _api_post(f"/metafields.json", payload)
-    return {"ok": True, "dry_run": False, "result": res}
+        return {"dry_run": True, "value": value_obj}
+    try:
+        payload = {
+            "metafield": {
+                "namespace": FAQ_NAMESPACE,
+                "key": FAQ_KEY,
+                "type": FAQ_TYPE,
+                "value": value_obj
+            }
+        }
+        created = _api_post(f"/products/{product_id}/metafields.json", payload).get("metafield")
+        return {"dry_run": False, "metafield": created}
+    except Exception as e:
+        return {"error": str(e)}
 
-@app.post("/seo/faq/bootstrap")
+@app.route("/seo/faq/bootstrap", methods=["GET", "POST"])
 def faq_bootstrap():
-    """메타필드 정의(custom.faq_json)가 없으면 생성"""
     if not _authorized(): return _unauth()
     out = _ensure_faq_definition()
     if out.get("ok"):
         return jsonify({"ok": True, "created": out.get("created", False), "definition": out.get("definition")})
     return jsonify({"ok": False, "error": out.get("error","unknown")}), 500
 
-@app.get("/seo/faq/preview")
-def faq_preview():
-    """FAQ JSON-LD 미리보기 (기본 FAQ 자동 생성 포함)
-       /seo/faq/preview?product_id=... 또는 ?handle=...
+@app.route("/seo/faq/apply", methods=["GET", "POST"])
+def faq_apply():
+    """
+    POST body 예시:
+    {
+      "dry_run": true,
+      "default_when_empty": true,
+      "items": [
+        {"handle":"aluminum-desktop-phone-holder-gravity-electric-stand",
+         "qas":[["각도 조절이 가능한가요?","네, 자유로운 각도/높이 조절이 가능합니다."]]}
+      ]
+    }
+    GET로 호출 시엔 샘플 드라이런으로 동작
     """
     if not _authorized(): return _unauth()
-    pid = request.args.get("product_id")
-    handle = request.args.get("handle")
-    if not pid and not handle:
-        return jsonify({"ok": False, "error": "missing product_id or handle"}), 400
 
-    try:
-        if handle:
-            p = _find_product_by_handle(handle)
-            if not p: return jsonify({"ok": False, "error": "product_not_found_by_handle"}), 404
-            pid = p["id"]; title = p.get("title") or "Product"
+    # GET이면 샘플 드라이런
+    body = request.get_json(silent=True) or {}
+    if request.method == "GET":
+        body = {
+            "dry_run": True,
+            "default_when_empty": True,
+            "items": body.get("items") or []
+        }
+
+    dry = bool(body.get("dry_run"))
+    default_when_empty = bool(body.get("default_when_empty"))
+    items = body.get("items") or []
+
+    # 정의 보장
+    ensure = _ensure_faq_definition()
+    if not ensure.get("ok"):
+        return jsonify({"ok": False, "error": ensure.get("error","faq_definition_failed")}), 500
+
+    # 제품 맵
+    pmap = _product_map(limit=250)
+
+    results, errors = [], []
+    # items가 비어있고 default_when_empty면 최근 active 제품 일부에 기본 Q/A 적용
+    if not items and default_when_empty:
+        # 기본 Q/A
+        default_qas = [
+            ["배송은 얼마나 걸리나요?", "결제 후 평균 1~3영업일 내 출고되며, 지역에 따라 상이할 수 있습니다."],
+            ["반품/교환이 가능한가요?", "상품 수령 후 7일 이내 미사용/훼손없음 조건에서 가능합니다."],
+            ["A/S는 어떻게 받나요?", "구매내역과 함께 고객센터로 문의 주시면 안내드립니다."]
+        ]
+        # 앞쪽 5개 정도만 대상
+        targets = list(pmap.values())[:5]
+        for t in targets:
+            r = _upsert_product_faq(t["id"], default_qas, dry=dry)
+            if "error" in r: errors.append({"handle": t["handle"], "error": r["error"]})
+            else:
+                results.append({"handle": t["handle"], "product_id": t["id"], **r})
+        return jsonify({"ok": True, "count": len(results), "items": results, "errors": errors, "dry_run": dry})
+
+    # 명시 items 처리
+    for it in items:
+        handle = it.get("handle")
+        qas = it.get("qas") or []
+        if not handle or not qas:
+            errors.append({"handle": handle, "error": "invalid_item"}); continue
+        prod = pmap.get(handle)
+        if not prod:
+            errors.append({"handle": handle, "error": "product_not_found"}); continue
+        r = _upsert_product_faq(prod["id"], qas, dry=dry)
+        if "error" in r: errors.append({"handle": handle, "error": r["error"]})
         else:
-            p = _api_get(f"/products/{pid}.json").get("product", {})
-            if not p: return jsonify({"ok": False, "error": "product_not_found"}), 404
-            title = p.get("title") or "Product"
+            results.append({"handle": handle, "product_id": prod["id"], **r})
 
-        # 기본 FAQ 생성
-        faq_json = _build_faq_jsonld(title, qas=[])
-        return jsonify({"ok": True, "product_id": int(pid), "handle": p.get("handle"), "faq_json": faq_json})
+    return jsonify({"ok": True, "count": len(results), "items": results, "errors": errors, "dry_run": dry})
+
+@app.get("/seo/faq/preview")
+def faq_preview():
+    """handle 로 저장된 faq_json을 JSON-LD 스니펫으로 렌더"""
+    if not _authorized(): return _unauth()
+    handle = request.args.get("handle", "").strip()
+    if not handle:
+        return jsonify({"ok": False, "error": "missing_handle"}), 400
+    # product id 찾기
+    pmap = _product_map(limit=250)
+    prod = pmap.get(handle)
+    if not prod:
+        return jsonify({"ok": False, "error": "product_not_found"}), 404
+
+    # 메타필드 조회
+    try:
+        metas = _api_get(f"/products/{prod['id']}/metafields.json",
+                         params={"namespace": FAQ_NAMESPACE, "key": FAQ_KEY}).get("metafields", [])
+        target = None
+        for m in metas:
+            if m.get("namespace")==FAQ_NAMESPACE and m.get("key")==FAQ_KEY:
+                target = m; break
+        if not target:
+            return jsonify({"ok": False, "error": "faq_metafield_not_set"}), 404
+        val = target.get("value")
+        if isinstance(val, str):
+            try: val = json.loads(val)
+            except: pass
+        jsonld = json.dumps(val, ensure_ascii=False, separators=(',',':'))
+        html = f'<!doctype html><meta charset="utf-8"><title>FAQ JSON-LD Preview</title>' \
+               f'<pre>{json.dumps(val, ensure_ascii=False, indent=2)}</pre>' \
+               f'<h3>Embed snippet</h3>' \
+               f'<pre>&lt;script type="application/ld+json"&gt;{jsonld}&lt;/script&gt;</pre>'
+        return Response(html, mimetype="text/html")
     except Exception as e:
         logging.exception("faq_preview error")
         return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.post("/seo/faq/apply")
-def faq_apply():
-    """FAQ JSON-LD 메타필드 쓰기
-       Body:
-       {
-         "items": [
-            {"product_id": 111, "qas": [["Q1","A1"],["Q2","A2"]]},
-            {"handle": "my-handle", "qas": [["Q","A"]]}
-         ],
-         "default_when_empty": true,
-         "dry_run": true
-       }
-    """
-    if not _authorized(): return _unauth()
-    body = request.get_json(silent=True) or {}
-    items = body.get("items") or []
-    dry = bool(body.get("dry_run", False))
-    default_when_empty = bool(body.get("default_when_empty", True))
-    if not items:
-        return jsonify({"ok": False, "error": "empty_items"}), 400
-
-    # ensure definition exists
-    ensure = _ensure_faq_definition()
-    if not ensure.get("ok"):
-        return jsonify({"ok": False, "error": "definition_error", "detail": ensure.get("error")}), 500
-
-    results, errors = [], []
-
-    for it in items:
-        pid = it.get("product_id")
-        handle = it.get("handle")
-        qas = it.get("qas") or []
-        try:
-            product = None
-            if pid:
-                product = _api_get(f"/products/{pid}.json").get("product", {})
-            elif handle:
-                product = _find_product_by_handle(handle)
-                pid = product["id"] if product else None
-            else:
-                errors.append({"error": "missing_product_id_or_handle", "item": it})
-                continue
-
-            if not product:
-                errors.append({"error": "product_not_found", "item": it})
-                continue
-
-            title = product.get("title") or "Product"
-            if not qas and not default_when_empty:
-                errors.append({"error": "empty_qas_and_no_default", "product_id": pid})
-                continue
-
-            faq_json = _build_faq_jsonld(title, qas)
-            write_res = _write_product_faq_metafield(int(pid), faq_json, dry=dry)
-            rec = {
-                "product_id": int(pid),
-                "handle": product.get("handle"),
-                "dry_run": write_res.get("dry_run", False),
-                "faq_json": faq_json if dry else None,
-                "result": None if dry else write_res.get("result")
-            }
-            _append_row({"event": "faq_apply", **{k:v for k,v in rec.items() if k!='faq_json'}})
-            results.append(rec)
-        except Exception as e:
-            logging.exception("faq_apply item error")
-            errors.append({"product_id": pid, "handle": handle, "error": str(e)})
-
-    return jsonify({"ok": len(errors)==0, "count": len(results), "items": results, "errors": errors, "dry_run": dry})
 
 # ─────────────────────────────────────────────────────────────
 # TEST UI — /tests (buttons that mirror your curl examples)
@@ -848,19 +830,14 @@ TEST_HTML = """
   <pre id="out5"></pre>
 </div>
 <div class="card">
-  <h3>6) FAQ 메타필드 부트스트랩</h3>
+  <h3>6) FAQ Bootstrap</h3>
   <button onclick="go('/seo/faq/bootstrap', 'POST', true)">POST /seo/faq/bootstrap?auth=...</button>
   <pre id="out6"></pre>
 </div>
 <div class="card">
-  <h3>7) FAQ 적용 (드라이런)</h3>
-  <button onclick="applyFaq(true)">POST /seo/faq/apply (dry_run)</button>
+  <h3>7) FAQ Apply (샘플 드라이런)</h3>
+  <button onclick="go('/seo/faq/apply', 'GET', true)">GET /seo/faq/apply?auth=... (dry)</button>
   <pre id="out7"></pre>
-</div>
-<div class="card">
-  <h3>8) FAQ 적용 (실행)</h3>
-  <button onclick="applyFaq(false)">POST /seo/faq/apply</button>
-  <pre id="out8"></pre>
 </div>
 <script>
 function el(id){return document.getElementById(id)}
@@ -875,34 +852,12 @@ async function go(path, method='GET', needsAuth=false){
     const txt = await res.text();
     let out = txt;
     try{ out = JSON.stringify(JSON.parse(txt), null, 2); }catch{}
-    const map={'/health':'out1','/sitemap-products.xml':'out2','/sitemap/ping':'out3','/seo/rewrite?limit=5&dry_run=true':'out4','/seo/rewrite?limit=5':'out5','/seo/faq/bootstrap':'out6'}
+    const map={'/health':'out1','/sitemap-products.xml':'out2','/sitemap/ping':'out3','/seo/rewrite?limit=5&dry_run=true':'out4','/seo/rewrite?limit=5':'out5','/seo/faq/bootstrap':'out6','/seo/faq/apply':'out7'}
     const key = Object.keys(map).find(k=>path.startsWith(k.split('?')[0]));
     el(map[key]||'out1').textContent = out;
   }catch(e){
     alert('요청 실패: '+e);
   }
-}
-
-async function applyFaq(dry){
-  const base=b(); const auth=a();
-  const url = base + '/seo/faq/apply?auth=' + encodeURIComponent(auth);
-  const payload = {
-    dry_run: dry,
-    default_when_empty: true,
-    items: [
-      {
-        handle: 'aluminum-desktop-phone-holder-gravity-electric-stand',
-        qas: [
-          ["각도 조절이 가능한가요?","네, 자유로운 각도/높이 조절이 가능합니다."],
-          ["케이블 정리는 어떻게 하나요?","받침대 내부 홈을 통해 깔끔하게 정리할 수 있습니다."]
-        ]
-      }
-    ]
-  };
-  const res = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-  const txt = await res.text();
-  let out = txt; try{ out = JSON.stringify(JSON.parse(txt),null,2); }catch{}
-  el(dry?'out7':'out8').textContent = out;
 }
 </script>
 """
