@@ -3,7 +3,7 @@
 # - Dashboard & reports
 # - Inventory check/sync
 # - SEO runner aliases
-# - NEW: /sitemap-products.xml, /sitemap/ping, /seo/rewrite, /tests
+# - NEW: /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite, /tests
 #
 # Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
 # Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
@@ -533,9 +533,9 @@ def sitemap_products():
         return Response(f"<!-- error: {e} -->", mimetype="application/xml", status=500)
 
 # ─────────────────────────────────────────────────────────────
-# NEW ②: 사이트맵 Ping  — POST /sitemap/ping?auth=...
+# NEW ②: 사이트맵 Ping  — GET/POST /sitemap/ping?auth=...
 # ─────────────────────────────────────────────────────────────
-@app.post("/sitemap/ping")
+@app.route("/sitemap/ping", methods=["GET", "POST"])
 def sitemap_ping():
     if not _authorized():
         return _unauth()
@@ -675,6 +675,7 @@ print("[BOOT] main.py loaded successfully")
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
