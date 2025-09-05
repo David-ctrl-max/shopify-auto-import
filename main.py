@@ -1,3 +1,13 @@
+# main.py — Unified (Existing features + New endpoints)
+# Features:
+# - Dashboard & reports
+# - Inventory check/sync
+# - SEO runner aliases
+# - NEW: /sitemap-products.xml, /sitemap/ping, /seo/rewrite
+#
+# Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
+# Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
+
 import os, sys, time, json, pathlib, datetime, logging, importlib
 from threading import Thread
 from urllib.parse import quote
@@ -53,7 +63,8 @@ HISTORY_FILE = REPORTS_DIR / "history.jsonl"
 def _append_row(row: dict):
     row["ts"] = datetime.datetime.utcnow().isoformat() + "Z"
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.write(json.dumps(row, ensure_ascii=False) + "
+")
 
 def _load_rows(limit=30):
     if not HISTORY_FILE.exists():
@@ -406,7 +417,10 @@ def inventory_sync():
 # ─────────────────────────────────────────────────────────────
 # 최근 업데이트된 상품 조회 (시간 기반 / 마지막 실행 기반 / 실제 변경 기반)
 # ─────────────────────────────────────────────────────────────
+
 def _iso(dt):
+    if isinstance(dt, str):
+        return dt
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     return dt.isoformat().replace("+00:00", "Z")
@@ -490,10 +504,104 @@ def report_last_updated_products():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
+# NEW ①: 사이드카 사이트맵 (products)  — /sitemap-products.xml
+# ─────────────────────────────────────────────────────────────
+@app.get("/sitemap-products.xml")
+def sitemap_products():
+    if not _authorized():
+        return _unauth()
+    try:
+        params = {"limit": 200, "fields": "id,handle,updated_at,images,published_at,status"}
+        data = _api_get("/products.json", params=params)
+        items = []
+        for p in data.get("products", []):
+            if p.get("status") != "active" or not p.get("published_at"):
+                continue
+            loc = f"https://{SHOP}.myshopify.com/products/{p['handle']}"
+            lastmod = p.get("updated_at", datetime.datetime.utcnow().isoformat() + "Z")
+            image_tags = ""
+            imgs = p.get("images") or []
+            if imgs and imgs[0].get("src"):
+                image_tags = f"""
+    <image:image>
+      <image:loc>{imgs[0]['src']}</image:loc>
+      <image:title>{p['handle']}</image:title>
+    </image:image>"""
+            items.append(f"""
+  <url>
+    <loc>{loc}</loc>
+    <lastmod>{lastmod}</lastmod>{image_tags}
+  </url>""")
+        body = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"
+        xmlns:image=\"http://www.google.com/schemas/sitemap-image/1.1\">
+{''.join(items)}
+</urlset>"""
+        return Response(body, mimetype="application/xml")
+    except Exception as e:
+        return Response(f"<!-- error: {e} -->", mimetype="application/xml", status=500)
+
+# ─────────────────────────────────────────────────────────────
+# NEW ②: 사이트맵 Ping  — POST /sitemap/ping?auth=...
+# ─────────────────────────────────────────────────────────────
+@app.post("/sitemap/ping")
+def sitemap_ping():
+    if not _authorized():
+        return _unauth()
+    sitemap_url = request.url_root.rstrip("/") + "/sitemap-products.xml"
+    ping_url = "https://www.google.com/ping?sitemap=" + quote(sitemap_url, safe="")
+    try:
+        r = requests.get(ping_url, timeout=TIMEOUT)
+        ok = (200 <= r.status_code < 400)
+        _append_row({"event": "sitemap_ping", "sitemap": sitemap_url, "google_status": r.status_code, "ok": ok})
+        return jsonify({"ok": ok, "sitemap": sitemap_url, "google_status": r.status_code})
+    except Exception as e:
+        _append_row({"event": "sitemap_ping_error", "error": str(e)})
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ─────────────────────────────────────────────────────────────
+# NEW ③: SEO Rewrite  — POST /seo/rewrite?limit=10&dry_run=true
+# ─────────────────────────────────────────────────────────────
+@app.post("/seo/rewrite")
+def seo_rewrite():
+    if not _authorized():
+        return _unauth()
+    try:
+        limit = int(request.args.get("limit", 10))
+        dry = (request.args.get("dry_run") or "").lower() in ("1","true","yes")
+
+        # 최근 활성 제품 가져오기 (필요시 페이지네이션 확장)
+        res = _api_get("/products.json", params={"limit": max(10, limit), "fields": "id,title,handle,status,published_at"})
+        candidates = [p for p in res.get("products", []) if p.get("status") == "active" and p.get("published_at")]
+        products = candidates[:limit]
+
+        changed = []
+        for p in products:
+            pid = p["id"]
+            base = (p.get("title") or "Best Pick").strip()
+            title_tag = f"{(base[:40]).rstrip()} | Jeff’s Favorite Picks"
+            desc_tag = "Fast shipping, easy returns, quality guaranteed. Grab yours today."
+
+            if dry:
+                changed.append({"id": pid, "handle": p.get("handle"), "title": title_tag, "description": desc_tag, "dry_run": True})
+                continue
+
+            payload = {"product": {"id": pid, "metafields_global_title_tag": title_tag, "metafields_global_description_tag": desc_tag}}
+            _api_post(f"/products/{pid}.json", payload)
+            rec = {"event": "seo_rewrite", "product_id": pid, "handle": p.get("handle"), "title": title_tag, "description": desc_tag}
+            _append_row(rec)
+            changed.append(rec)
+        return jsonify({"ok": True, "count": len(changed), "items": changed, "dry_run": dry})
+    except Exception as e:
+        _append_row({"event": "seo_rewrite_error", "error": str(e)})
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ─────────────────────────────────────────────────────────────
 # 실행
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
