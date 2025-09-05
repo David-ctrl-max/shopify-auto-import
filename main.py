@@ -3,7 +3,7 @@
 # - Dashboard & reports
 # - Inventory check/sync
 # - SEO runner aliases
-# - NEW: /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite (GET+POST)
+# - NEW: /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite, /tests
 # - NEW: FAQ JSON-LD bootstrap/apply/preview
 #
 # Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
@@ -55,14 +55,6 @@ def _api_post(path, payload):
     r.raise_for_status()
     return r.json()
 
-def _api_put(path, payload):
-    if not SHOP:
-        raise RuntimeError("SHOPIFY_STORE env is empty")
-    url = f"https://{SHOP}.myshopify.com/admin/api/{API_VERSION}{path}"
-    r = S.put(url, json=payload, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
-
 # ─────────────────────────────────────────────────────────────
 # 리포트 저장소
 # ─────────────────────────────────────────────────────────────
@@ -89,13 +81,12 @@ def _load_rows(limit=30):
     return out
 
 def _quickchart_url(labels, values, label="CTR %"):
-    from urllib.parse import quote as _q
     cfg = {
         "type": "line",
         "data": {"labels": labels, "datasets": [{"label": label, "data": values}]},
         "options": {"plugins": {"legend": {"display": False}}},
     }
-    return f"https://quickchart.io/chart?c={_q(json.dumps(cfg, separators=(',',':')))}"
+    return f"https://quickchart.io/chart?c={quote(json.dumps(cfg, separators=(',',':')))}"
 
 # ─────────────────────────────────────────────────────────────
 # Flask
@@ -561,17 +552,17 @@ def sitemap_ping():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ③: SEO Rewrite  — GET/POST /seo/rewrite?limit=10&dry_run=true
+# NEW ③: SEO Rewrite  — POST /seo/rewrite?limit=10&dry_run=true
 # ─────────────────────────────────────────────────────────────
-@app.route("/seo/rewrite", methods=["GET", "POST"])
+@app.post("/seo/rewrite")
 def seo_rewrite():
     if not _authorized():
         return _unauth()
     try:
-        # GET에서도 사용 가능하도록 query에서 읽음
         limit = int(request.args.get("limit", 10))
         dry = (request.args.get("dry_run") or "").lower() in ("1","true","yes")
 
+        # 최근 활성 제품 가져오기 (필요시 페이지네이션 확장)
         res = _api_get("/products.json", params={"limit": max(10, limit), "fields": "id,title,handle,status,published_at"})
         candidates = [p for p in res.get("products", []) if p.get("status") == "active" and p.get("published_at")]
         products = candidates[:limit]
@@ -588,7 +579,7 @@ def seo_rewrite():
                 continue
 
             payload = {"product": {"id": pid, "metafields_global_title_tag": title_tag, "metafields_global_description_tag": desc_tag}}
-            _api_put(f"/products/{pid}.json", payload)
+            _api_post(f"/products/{pid}.json", payload)
             rec = {"event": "seo_rewrite", "product_id": pid, "handle": p.get("handle"), "title": title_tag, "description": desc_tag}
             _append_row(rec)
             changed.append(rec)
@@ -598,22 +589,76 @@ def seo_rewrite():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ④: FAQ JSON-LD 지원
-#   - 메타필드 정의 생성(custom.faq_json)
-#   - 제품에 FAQ JSON upsert
-#   - 미리보기
+# NEW ④: FAQ JSON-LD (metafield: custom.faq_json, type=json)
 # ─────────────────────────────────────────────────────────────
 FAQ_NAMESPACE = "custom"
 FAQ_KEY = "faq_json"
-FAQ_TYPE = "json"  # Shopify metafield type
+FAQ_TYPE = "json"
+
+def _qa_list_to_jsonld(qas):
+    """[['Q','A'], ...] -> FAQPage JSON-LD dict"""
+    items = []
+    for qa in qas or []:
+        if not isinstance(qa, (list, tuple)) or len(qa) < 2:
+            continue
+        q, a = (qa[0] or "").strip(), (qa[1] or "").strip()
+        if not q or not a:
+            continue
+        items.append({
+            "@type": "Question",
+            "name": q,
+            "acceptedAnswer": { "@type": "Answer", "text": a }
+        })
+    return {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": items
+    }
+
+def _get_product_by(handle=None, pid=None, fields="id,handle,title"):
+    """간단한 조회기: id가 있으면 id로, 아니면 250개 내에서 handle 매칭"""
+    if pid:
+        try:
+            j = _api_get(f"/products/{pid}.json", params={"fields": fields})
+            return j.get("product")
+        except Exception:
+            return None
+    # handle로는 REST 필터가 없어 로컬 필터링
+    try:
+        data = _api_get("/products.json", params={"limit": 250, "fields": fields})
+        for p in data.get("products", []):
+            if p.get("handle") == handle:
+                return p
+    except Exception:
+        return None
+    return None
 
 def _ensure_faq_definition():
-    """custom.faq_json 메타필드 정의가 없으면 생성"""
+    """
+    custom.faq_json 메타필드 정의가 없으면 생성.
+    일부 조합에서 필터 쿼리가 404/400을 반환해 단계적으로 완화해 탐색합니다.
+    """
     try:
-        q = {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY, "owner_types[]": "product"}
-        exists = _api_get("/metafield_definitions.json", params=q).get("metafield_definitions", [])
-        if exists:
-            return {"ok": True, "created": False, "definition": exists[0]}
+        tries = [
+            {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY, "owner_types": "product"},
+            {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY},
+            {"namespace": FAQ_NAMESPACE},
+            {},
+        ]
+        for params in tries:
+            try:
+                data = _api_get("/metafield_definitions.json", params=params)
+            except requests.HTTPError as he:
+                if he.response is not None and he.response.status_code in (404, 400):
+                    continue
+                raise
+            defs = data.get("metafield_definitions", []) or []
+            for d in defs:
+                if d.get("namespace") == FAQ_NAMESPACE and d.get("key") == FAQ_KEY:
+                    ots = d.get("owner_types") or []
+                    if not ots or "product" in ots:
+                        return {"ok": True, "created": False, "definition": d}
+
         payload = {
             "metafield_definition": {
                 "name": "Product FAQ JSON",
@@ -621,7 +666,7 @@ def _ensure_faq_definition():
                 "key": FAQ_KEY,
                 "type": FAQ_TYPE,
                 "description": "Google FAQPage markup(JSON-LD) source for the product",
-                "owner_types": ["product"]
+                "owner_types": ["product"],
             }
         }
         created = _api_post("/metafield_definitions.json", payload).get("metafield_definition")
@@ -630,25 +675,11 @@ def _ensure_faq_definition():
         logging.exception("ensure_faq_definition error")
         return {"ok": False, "error": str(e)}
 
-def _product_map(limit=250):
-    """handle -> {id, handle, title} 매핑"""
-    res = _api_get("/products.json", params={"limit": limit, "fields": "id,handle,title,status,published_at"})
-    out = {}
-    for p in res.get("products", []):
-        out[p.get("handle")] = {"id": p.get("id"), "handle": p.get("handle"), "title": p.get("title")}
-    return out
-
-def _qa_list_to_jsonld(qas):
-    """[['Q','A'], ...] -> JSON-LD dict"""
-    main_entity = [{"@type": "Question", "name": q, "acceptedAnswer": {"@type": "Answer", "text": a}} for q,a in qas]
-    return {
-        "@context":"https://schema.org",
-        "@type":"FAQPage",
-        "mainEntity": main_entity
-    }
-
 def _upsert_product_faq(product_id: int, qas, dry=False):
-    """제품 메타필드 upsert. dry=True면 API 호출 없이 preview만 반환"""
+    """
+    제품 메타필드 upsert.
+    Shopify REST 'type=json' 은 value를 JSON 문자열로 보내는 것이 가장 호환성이 좋습니다.
+    """
     value_obj = _qa_list_to_jsonld(qas)
     if dry:
         return {"dry_run": True, "value": value_obj}
@@ -658,7 +689,7 @@ def _upsert_product_faq(product_id: int, qas, dry=False):
                 "namespace": FAQ_NAMESPACE,
                 "key": FAQ_KEY,
                 "type": FAQ_TYPE,
-                "value": value_obj
+                "value": json.dumps(value_obj, ensure_ascii=False)
             }
         }
         created = _api_post(f"/products/{product_id}/metafields.json", payload).get("metafield")
@@ -667,119 +698,108 @@ def _upsert_product_faq(product_id: int, qas, dry=False):
         return {"error": str(e)}
 
 @app.route("/seo/faq/bootstrap", methods=["GET", "POST"])
-def faq_bootstrap():
+def seo_faq_bootstrap():
+    """메타필드 정의 생성/확인 (GET/POST 모두 허용)"""
     if not _authorized(): return _unauth()
-    out = _ensure_faq_definition()
-    if out.get("ok"):
-        return jsonify({"ok": True, "created": out.get("created", False), "definition": out.get("definition")})
-    return jsonify({"ok": False, "error": out.get("error","unknown")}), 500
+    res = _ensure_faq_definition()
+    status = 200 if res.get("ok") else 500
+    return jsonify(res), status
 
 @app.route("/seo/faq/apply", methods=["GET", "POST"])
-def faq_apply():
+def seo_faq_apply():
     """
-    POST body 예시:
-    {
-      "dry_run": true,
-      "default_when_empty": true,
-      "items": [
-        {"handle":"aluminum-desktop-phone-holder-gravity-electric-stand",
-         "qas":[["각도 조절이 가능한가요?","네, 자유로운 각도/높이 조절이 가능합니다."]]}
-      ]
-    }
-    GET로 호출 시엔 샘플 드라이런으로 동작
+    FAQ JSON-LD 적용.
+    - GET: dry-run, 최근 활성 제품 max 5개에 샘플 Q/A 적용 미리보기
+      /seo/faq/apply?auth=...&limit=5
+    - POST: 본 적용. body:
+      {"dry_run": false, "items":[{"id":123}|{"handle":"xxx","qas":[["Q","A"],...]}]}
     """
     if not _authorized(): return _unauth()
-
-    # GET이면 샘플 드라이런
-    body = request.get_json(silent=True) or {}
     if request.method == "GET":
-        body = {
-            "dry_run": True,
-            "default_when_empty": True,
-            "items": body.get("items") or []
-        }
-
-    dry = bool(body.get("dry_run"))
-    default_when_empty = bool(body.get("default_when_empty"))
-    items = body.get("items") or []
-
-    # 정의 보장
-    ensure = _ensure_faq_definition()
-    if not ensure.get("ok"):
-        return jsonify({"ok": False, "error": ensure.get("error","faq_definition_failed")}), 500
-
-    # 제품 맵
-    pmap = _product_map(limit=250)
-
-    results, errors = [], []
-    # items가 비어있고 default_when_empty면 최근 active 제품 일부에 기본 Q/A 적용
-    if not items and default_when_empty:
-        # 기본 Q/A
-        default_qas = [
-            ["배송은 얼마나 걸리나요?", "결제 후 평균 1~3영업일 내 출고되며, 지역에 따라 상이할 수 있습니다."],
-            ["반품/교환이 가능한가요?", "상품 수령 후 7일 이내 미사용/훼손없음 조건에서 가능합니다."],
-            ["A/S는 어떻게 받나요?", "구매내역과 함께 고객센터로 문의 주시면 안내드립니다."]
+        try:
+            limit = int(request.args.get("limit", 5))
+        except:
+            limit = 5
+        # 샘플 제품
+        data = _api_get("/products.json", params={"limit": max(10, limit), "fields": "id,title,handle,status,published_at"})
+        products = [p for p in data.get("products", []) if p.get("status") == "active" and p.get("published_at")][:limit]
+        sample_qas = [
+            ["배송은 얼마나 걸리나요?", "보통 2~5영업일 내 도착합니다."],
+            ["반품이 가능한가요?", "수령 후 14일 이내 미사용 제품은 반품 가능합니다."]
         ]
-        # 앞쪽 5개 정도만 대상
-        targets = list(pmap.values())[:5]
-        for t in targets:
-            r = _upsert_product_faq(t["id"], default_qas, dry=dry)
-            if "error" in r: errors.append({"handle": t["handle"], "error": r["error"]})
-            else:
-                results.append({"handle": t["handle"], "product_id": t["id"], **r})
-        return jsonify({"ok": True, "count": len(results), "items": results, "errors": errors, "dry_run": dry})
+        items = []
+        for p in products:
+            items.append({
+                "id": p["id"], "handle": p.get("handle"), "title": p.get("title"),
+                "dry_run": True, "value": _qa_list_to_jsonld(sample_qas)
+            })
+        return jsonify({"ok": True, "dry_run": True, "count": len(items), "items": items})
 
-    # 명시 items 처리
+    # POST
+    body = request.get_json(silent=True) or {}
+    dry = bool(body.get("dry_run", False))
+    items = body.get("items") or []
+    if not items:
+        return jsonify({"ok": False, "error": "empty_items"}), 400
+
+    boot = _ensure_faq_definition()
+    if not boot.get("ok"):
+        return jsonify({"ok": False, "error": f"definition_error:{boot.get('error')}"}), 500
+
+    out = []
     for it in items:
+        pid = it.get("id")
         handle = it.get("handle")
-        qas = it.get("qas") or []
-        if not handle or not qas:
-            errors.append({"handle": handle, "error": "invalid_item"}); continue
-        prod = pmap.get(handle)
-        if not prod:
-            errors.append({"handle": handle, "error": "product_not_found"}); continue
-        r = _upsert_product_faq(prod["id"], qas, dry=dry)
-        if "error" in r: errors.append({"handle": handle, "error": r["error"]})
-        else:
-            results.append({"handle": handle, "product_id": prod["id"], **r})
-
-    return jsonify({"ok": True, "count": len(results), "items": results, "errors": errors, "dry_run": dry})
+        qas = it.get("qas") or [
+            ["제품 보증은 어떻게 되나요?", "구매일로부터 1년 간 기본 보증을 제공합니다."],
+            ["해외 배송이 되나요?", "현재는 국내 배송만 지원합니다."]
+        ]
+        if not pid:
+            p = _get_product_by(handle=handle, pid=None, fields="id,handle,title")
+            if not p:
+                out.append({"handle": handle, "error": "product_not_found"})
+                continue
+            pid = p["id"]
+        result = _upsert_product_faq(pid, qas, dry=dry)
+        result.update({"id": pid, "handle": handle})
+        out.append(result)
+    return jsonify({"ok": True, "dry_run": dry, "items": out})
 
 @app.get("/seo/faq/preview")
-def faq_preview():
-    """handle 로 저장된 faq_json을 JSON-LD 스니펫으로 렌더"""
+def seo_faq_preview():
+    """
+    특정 상품의 현재 FAQ 메타필드 값 미리보기
+    /seo/faq/preview?auth=...&handle=xxx  (또는 &id=123)
+    """
     if not _authorized(): return _unauth()
-    handle = request.args.get("handle", "").strip()
-    if not handle:
-        return jsonify({"ok": False, "error": "missing_handle"}), 400
-    # product id 찾기
-    pmap = _product_map(limit=250)
-    prod = pmap.get(handle)
-    if not prod:
+    handle = request.args.get("handle")
+    pid = request.args.get("id")
+    if pid:
+        try:
+            pid = int(pid)
+        except:
+            pid = None
+    product = _get_product_by(handle=handle, pid=pid, fields="id,handle,title")
+    if not product:
         return jsonify({"ok": False, "error": "product_not_found"}), 404
-
-    # 메타필드 조회
+    # 제품 메타필드 목록 가져와서 our key만 추리기
     try:
-        metas = _api_get(f"/products/{prod['id']}/metafields.json",
-                         params={"namespace": FAQ_NAMESPACE, "key": FAQ_KEY}).get("metafields", [])
+        m = _api_get(f"/products/{product['id']}/metafields.json", params={"limit": 250})
+        metas = m.get("metafields", [])
         target = None
-        for m in metas:
-            if m.get("namespace")==FAQ_NAMESPACE and m.get("key")==FAQ_KEY:
-                target = m; break
+        for mf in metas:
+            if mf.get("namespace")==FAQ_NAMESPACE and mf.get("key")==FAQ_KEY:
+                target = mf; break
         if not target:
-            return jsonify({"ok": False, "error": "faq_metafield_not_set"}), 404
+            return jsonify({"ok": True, "product": product, "has_faq": False})
+        # value는 문자열(json)일 수 있음
         val = target.get("value")
-        if isinstance(val, str):
-            try: val = json.loads(val)
-            except: pass
-        jsonld = json.dumps(val, ensure_ascii=False, separators=(',',':'))
-        html = f'<!doctype html><meta charset="utf-8"><title>FAQ JSON-LD Preview</title>' \
-               f'<pre>{json.dumps(val, ensure_ascii=False, indent=2)}</pre>' \
-               f'<h3>Embed snippet</h3>' \
-               f'<pre>&lt;script type="application/ld+json"&gt;{jsonld}&lt;/script&gt;</pre>'
-        return Response(html, mimetype="text/html")
+        try:
+            parsed = json.loads(val) if isinstance(val, str) else val
+        except Exception:
+            parsed = val
+        return jsonify({"ok": True, "product": product, "has_faq": True, "metafield": target, "parsed_value": parsed})
     except Exception as e:
-        logging.exception("faq_preview error")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
@@ -830,14 +850,19 @@ TEST_HTML = """
   <pre id="out5"></pre>
 </div>
 <div class="card">
-  <h3>6) FAQ Bootstrap</h3>
-  <button onclick="go('/seo/faq/bootstrap', 'POST', true)">POST /seo/faq/bootstrap?auth=...</button>
+  <h3>6) 배치 실행 별칭 (/register)</h3>
+  <button onclick="go('/register', 'GET', true)">GET /register?auth=...</button>
   <pre id="out6"></pre>
 </div>
 <div class="card">
-  <h3>7) FAQ Apply (샘플 드라이런)</h3>
-  <button onclick="go('/seo/faq/apply', 'GET', true)">GET /seo/faq/apply?auth=... (dry)</button>
+  <h3>7) FAQ 부트스트랩</h3>
+  <button onclick="go('/seo/faq/bootstrap', 'GET', true)">GET /seo/faq/bootstrap?auth=...</button>
   <pre id="out7"></pre>
+</div>
+<div class="card">
+  <h3>8) FAQ 샘플 적용(드라이런)</h3>
+  <button onclick="go('/seo/faq/apply?limit=5', 'GET', true)">GET /seo/faq/apply?limit=5&auth=...</button>
+  <pre id="out8"></pre>
 </div>
 <script>
 function el(id){return document.getElementById(id)}
@@ -852,7 +877,7 @@ async function go(path, method='GET', needsAuth=false){
     const txt = await res.text();
     let out = txt;
     try{ out = JSON.stringify(JSON.parse(txt), null, 2); }catch{}
-    const map={'/health':'out1','/sitemap-products.xml':'out2','/sitemap/ping':'out3','/seo/rewrite?limit=5&dry_run=true':'out4','/seo/rewrite?limit=5':'out5','/seo/faq/bootstrap':'out6','/seo/faq/apply':'out7'}
+    const map={'/health':'out1','/sitemap-products.xml':'out2','/sitemap/ping':'out3','/seo/rewrite?limit=5&dry_run=true':'out4','/seo/rewrite?limit=5':'out5','/register':'out6','/seo/faq/bootstrap':'out7','/seo/faq/apply':'out8'}
     const key = Object.keys(map).find(k=>path.startsWith(k.split('?')[0]));
     el(map[key]||'out1').textContent = out;
   }catch(e){
