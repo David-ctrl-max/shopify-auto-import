@@ -65,9 +65,7 @@ HISTORY_FILE = REPORTS_DIR / "history.jsonl"
 def _append_row(row: dict):
     row["ts"] = datetime.datetime.utcnow().isoformat() + "Z"
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        # keep this EXACTLY like this (Render once failed due to missing closing string)
-        f.write(json.dumps(row, ensure_ascii=False) + "
-")
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 def _load_rows(limit=30):
     if not HISTORY_FILE.exists():
@@ -411,7 +409,6 @@ def inventory_sync():
 # ─────────────────────────────────────────────────────────────
 # 최근 업데이트된 상품 조회
 # ─────────────────────────────────────────────────────────────
-
 def _iso(dt):
     if isinstance(dt, str):
         return dt
@@ -526,9 +523,9 @@ def sitemap_products():
     <loc>{loc}</loc>
     <lastmod>{lastmod}</lastmod>{image_tags}
   </url>""")
-        body = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"
-        xmlns:image=\"http://www.google.com/schemas/sitemap-image/1.1\">
+        body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
 {''.join(items)}
 </urlset>"""
         return Response(body, mimetype="application/xml")
@@ -595,7 +592,7 @@ def seo_rewrite():
 # ─────────────────────────────────────────────────────────────
 TEST_HTML = """
 <!doctype html>
-<meta charset=\"utf-8\">
+<meta charset="utf-8">
 <title>SEO Test Playground</title>
 <style>
   body{font-family:system-ui,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 16px;color:#222}
@@ -608,39 +605,39 @@ TEST_HTML = """
 </style>
 <h1>SEO Test Playground</h1>
 <p>아래 버튼들은 명령행 <code>curl</code> 예제를 브라우저에서 쉽게 실행할 수 있도록 만든 테스트 도구입니다.</p>
-<div class=\"row\">
-  <label>Base URL <input id=\"base\" size=\"50\" value=\"https://shopify-auto-import.onrender.com\"></label>
-  <label>Auth <input id=\"auth\" size=\"20\" value=\"jeffshopsecure\"></label>
+<div class="row">
+  <label>Base URL <input id="base" size="50" value="https://shopify-auto-import.onrender.com"></label>
+  <label>Auth <input id="auth" size="20" value="jeffshopsecure"></label>
 </div>
-<div class=\"card\">
+<div class="card">
   <h3>1) 헬스체크</h3>
-  <button onclick=\"go('/health')\">GET /health</button>
-  <pre id=\"out1\"></pre>
+  <button onclick="go('/health')">GET /health</button>
+  <pre id="out1"></pre>
 </div>
-<div class=\"card\">
+<div class="card">
   <h3>2) 사이트맵 생성 확인</h3>
-  <button onclick=\"go('/sitemap-products.xml', 'GET', true)\">GET /sitemap-products.xml?auth=...</button>
-  <pre id=\"out2\"></pre>
+  <button onclick="go('/sitemap-products.xml', 'GET', true)">GET /sitemap-products.xml?auth=...</button>
+  <pre id="out2"></pre>
 </div>
-<div class=\"card\">
+<div class="card">
   <h3>3) Google 핑</h3>
-  <button onclick=\"go('/sitemap/ping', 'POST', true)\">POST /sitemap/ping?auth=...</button>
-  <pre id=\"out3\"></pre>
+  <button onclick="go('/sitemap/ping', 'POST', true)">POST /sitemap/ping?auth=...</button>
+  <pre id="out3"></pre>
 </div>
-<div class=\"card\">
+<div class="card">
   <h3>4) SEO 리라이트 (드라이런)</h3>
-  <button onclick=\"go('/seo/rewrite?limit=5&dry_run=true', 'POST', true)\">POST /seo/rewrite?limit=5&dry_run=true&auth=...</button>
-  <pre id=\"out4\"></pre>
+  <button onclick="go('/seo/rewrite?limit=5&dry_run=true', 'POST', true)">POST /seo/rewrite?limit=5&dry_run=true&auth=...</button>
+  <pre id="out4"></pre>
 </div>
-<div class=\"card\">
+<div class="card">
   <h3>5) SEO 리라이트 (실행)</h3>
-  <button onclick=\"go('/seo/rewrite?limit=5', 'POST', true)\">POST /seo/rewrite?limit=5&auth=...</button>
-  <pre id=\"out5\"></pre>
+  <button onclick="go('/seo/rewrite?limit=5', 'POST', true)">POST /seo/rewrite?limit=5&auth=...</button>
+  <pre id="out5"></pre>
 </div>
-<div class=\"card\">
+<div class="card">
   <h3>6) 배치 실행 별칭 (/register)</h3>
-  <button onclick=\"go('/register', 'GET', true)\">GET /register?auth=...</button>
-  <pre id=\"out6\"></pre>
+  <button onclick="go('/register', 'GET', true)">GET /register?auth=...</button>
+  <pre id="out6"></pre>
 </div>
 <script>
 function el(id){return document.getElementById(id)}
@@ -678,6 +675,7 @@ print("[BOOT] main.py loaded successfully")
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
