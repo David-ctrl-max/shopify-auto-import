@@ -1,19 +1,25 @@
-# main.py — Unified (Existing features + Sitemap/SEO + FAQ JSON-LD)
+# main.py — Unified (Existing features + Sitemap/SEO + FAQ JSON-LD + GSC Low CTR)
 # Features:
 # - Dashboard & reports
 # - Inventory check/sync
 # - SEO runner aliases
 # - /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite, /tests
 # - NEW: FAQ JSON-LD bootstrap/apply/preview (custom.faq_json)
+# - NEW: GSC Low CTR endpoint /seo/gsc/low-ctr
 #
 # Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
 # Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
+# GSC: GSC_SITE, GSC_SA_JSON_B64, GSC_MIN_IMPRESSIONS(100), GSC_LIMIT(20)
 
-import os, sys, time, json, pathlib, datetime, logging, importlib
+import os, sys, time, json, pathlib, datetime, logging, importlib, base64
 from threading import Thread
 from urllib.parse import quote
 from flask import Flask, jsonify, request, Response, render_template_string
 import requests
+
+# Google Search Console libs
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 print("[BOOT] importing main.py...")
 
@@ -36,7 +42,7 @@ if ADMIN_TOKEN:
         "X-Shopify-Access-Token": ADMIN_TOKEN,
         "Content-Type": "application/json",
         "Accept": "application/json",
-#if Render adds gzip by default, fine
+        # if Render adds gzip by default, fine
         "User-Agent": "shopify-auto-import/1.0",
     })
 
@@ -79,6 +85,14 @@ def _gql(query: str, variables=None):
     except requests.HTTPError as he:
         text = he.response.text if he.response is not None else ""
         raise RuntimeError(f"graphql_http_error {he} body={text[:500]}")
+
+# ─────────────────────────────────────────────────────────────
+# Google Search Console ENV
+# ─────────────────────────────────────────────────────────────
+GSC_SITE = os.environ.get("GSC_SITE", "").strip()            # 예: https://jeffsfavoritepicks.com/
+GSC_SA_JSON_B64 = os.environ.get("GSC_SA_JSON_B64", "").strip()
+GSC_MIN_IMPRESSIONS = int(os.environ.get("GSC_MIN_IMPRESSIONS", "100"))
+GSC_LIMIT = int(os.environ.get("GSC_LIMIT", "20"))
 
 # ─────────────────────────────────────────────────────────────
 # 리포트 저장소
@@ -287,6 +301,70 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #e5e5e5;padd
 <h3>📈 CTR Trend (최근 10일)</h3><img src="{chart_url}" width="600"/>
 <p style="color:#777;font-size:12px">Generated {datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")}</p>"""
     return Response(html, mimetype="text/html")
+
+# ─────────────────────────────────────────────────────────────
+# Google Search Console: 하위 CTR 추출
+# ─────────────────────────────────────────────────────────────
+def _gsc_creds():
+    if not GSC_SA_JSON_B64:
+        raise RuntimeError("GSC_SA_JSON_B64 missing")
+    data = json.loads(base64.b64decode(GSC_SA_JSON_B64).decode("utf-8"))
+    return service_account.Credentials.from_service_account_info(
+        data, scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
+    )
+
+def gsc_query_low_ctr(site_url: str, start_date: str, end_date: str,
+                      min_impr: int = GSC_MIN_IMPRESSIONS, limit: int = GSC_LIMIT):
+    """
+    GSC에서 페이지 차원의 클릭/노출/CTR/포지션을 가져와
+    - 노출 수 >= min_impr
+    - CTR 오름차순(낮은 값 우선), 동일 시 노출 많은 순
+    로 정렬해 상위 limit개 반환
+    """
+    creds = _gsc_creds()
+    svc = build("searchconsole", "v1", credentials=creds)
+    body = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "dimensions": ["page"],
+        "rowLimit": 25000,
+    }
+    resp = svc.searchanalytics().query(siteUrl=site_url, body=body).execute()
+    rows = resp.get("rows", []) or []
+    rows = [
+        {
+            "page": r["keys"][0],
+            "clicks": r.get("clicks", 0),
+            "impressions": r.get("impressions", 0),
+            "ctr": r.get("ctr", 0.0),
+            "position": r.get("position", 0.0),
+        }
+        for r in rows
+        if r.get("impressions", 0) >= min_impr
+    ]
+    rows.sort(key=lambda x: (x["ctr"], -x["impressions"]))
+    return rows[:limit]
+
+@app.get("/seo/gsc/low-ctr")
+def seo_gsc_low_ctr():
+    """
+    예: /seo/gsc/low-ctr?auth=jeffshopsecure
+    최근 28일 CTR 하위 N개(기본 20) 반환
+    """
+    if not _authorized():
+        return _unauth()
+    if not GSC_SITE:
+        return jsonify({"ok": False, "error": "GSC_SITE missing"}), 400
+    try:
+        today = datetime.date.today()
+        start = (today - datetime.timedelta(days=28)).isoformat()
+        end = (today - datetime.timedelta(days=1)).isoformat()
+        items = gsc_query_low_ctr(GSC_SITE, start, end)
+        _append_row({"event": "gsc_low_ctr", "start": start, "end": end, "count": len(items)})
+        return jsonify({"ok": True, "start": start, "end": end, "count": len(items), "items": items})
+    except Exception as e:
+        logging.exception("seo_gsc_low_ctr failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
 # SEO/임포트 실행부
