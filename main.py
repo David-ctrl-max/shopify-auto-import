@@ -60,6 +60,14 @@ def _api_post(path, payload):
     r.raise_for_status()
     return r.json()
 
+def _api_put(path, payload):
+    if not SHOP:
+        raise RuntimeError("SHOPIFY_STORE env is empty")
+    url = f"https://{SHOP}.myshopify.com/admin/api/{API_VERSION}{path}"
+    r = S.put(url, json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
 # ─────────────────────────────────────────────────────────────
 # 리포트 저장소
 # ─────────────────────────────────────────────────────────────
@@ -739,11 +747,9 @@ DEFAULT_FAQ = [
 def _get_product_by_handle(handle: str):
     try:
         res = _api_get("/products.json", params={"handle": handle})
-        # handle 필터가 REST에 직접 없을 수 있어 전체에서 찾기
         for p in res.get("products", []):
             if p.get("handle") == handle:
                 return p
-        # 보조: 목록에서 스캔
         res2 = _api_get("/products.json", params={"limit": 250})
         for p in res2.get("products", []):
             if p.get("handle") == handle:
@@ -753,7 +759,6 @@ def _get_product_by_handle(handle: str):
     return None
 
 def _get_faq_metafield(product_id: int):
-    # /products/{id}/metafields.json 로드 후 namespace/key 매칭
     try:
         mres = _api_get(f"/products/{product_id}/metafields.json")
         for m in mres.get("metafields", []):
@@ -764,7 +769,6 @@ def _get_faq_metafield(product_id: int):
     return None
 
 def _set_faq_metafield(product_id: int, faq_list):
-    # value는 문자열(JSON)로, type은 json
     payload = {
         "metafield": {
             "namespace": "custom",
@@ -774,19 +778,21 @@ def _set_faq_metafield(product_id: int, faq_list):
         }
     }
     try:
+        # 없으면 생성 (product scope)
         return _api_post(f"/products/{product_id}/metafields.json", payload)
-    except Exception as e:
-        # 이미 존재하는 경우 업데이트로 재시도
+    except Exception:
+        # 있으면 업데이트 (PUT /metafields/{id}.json)
         existing = _get_faq_metafield(product_id)
-        if existing:
-            mf_id = existing.get("id")
-            try:
-                return _api_post(f"/metafields/{mf_id}.json", {
-                    "metafield": {"id": mf_id, "value": json.dumps(faq_list, ensure_ascii=False)}
-                })
-            except Exception as e2:
-                raise e2
-        raise e
+        if not existing:
+            raise
+        mf_id = existing.get("id")
+        return _api_put(f"/metafields/{mf_id}.json", {
+            "metafield": {
+                "id": mf_id,
+                "type": "json",
+                "value": json.dumps(faq_list, ensure_ascii=False)
+            }
+        })
 
 @app.get("/seo/faq/bootstrap")
 def faq_bootstrap():
@@ -794,7 +800,6 @@ def faq_bootstrap():
         return _unauth()
     dry = (request.args.get("dry_run") or "").lower() in ("1","true","yes")
     limit = int(request.args.get("limit", "20"))
-    # 활성 상품 대상
     res = _api_get("/products.json", params={"limit": max(50, limit), "fields": "id,handle,title,status,published_at"})
     targets = [p for p in res.get("products", []) if p.get("status")=="active" and p.get("published_at")][:limit]
 
@@ -968,4 +973,5 @@ print("[BOOT] main.py loaded successfully")
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
