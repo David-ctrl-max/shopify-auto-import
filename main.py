@@ -1,25 +1,24 @@
-# main.py — Unified (Existing features + Sitemap/SEO + FAQ JSON-LD + GSC Low CTR)
+# main.py — Unified (Existing features + New endpoints)
 # Features:
 # - Dashboard & reports
 # - Inventory check/sync
 # - SEO runner aliases
-# - /sitemap-products.xml, /sitemap/ping (GET+POST), /seo/rewrite, /tests
-# - NEW: FAQ JSON-LD bootstrap/apply/preview (custom.faq_json)
-# - NEW: GSC Low CTR endpoint /seo/gsc/low-ctr
+# - Sitemap: /sitemap-products.xml, /sitemap/ping (GET+POST)
+# - SEO rewrite (POST /seo/rewrite)
+# - NEW:
+#   * GSC CSV low-CTR: /gsc/low-ctr/upload, /gsc/low-ctr/list
+#   * Rewrite by handles: /seo/rewrite/by-handles (POST)
+#   * FAQ JSON metafield bootstrap: /seo/faq/bootstrap (GET)
+#   * FAQ JSON-LD preview: /seo/faq/jsonld?handle=... (GET)
 #
 # Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
 # Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
-# GSC: GSC_SITE, GSC_SA_JSON_B64, GSC_MIN_IMPRESSIONS(100), GSC_LIMIT(20)
 
-import os, sys, time, json, pathlib, datetime, logging, importlib, base64
+import os, sys, time, json, pathlib, datetime, logging, importlib, re, csv
 from threading import Thread
 from urllib.parse import quote
 from flask import Flask, jsonify, request, Response, render_template_string
 import requests
-
-# Google Search Console libs
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 
 print("[BOOT] importing main.py...")
 
@@ -42,7 +41,6 @@ if ADMIN_TOKEN:
         "X-Shopify-Access-Token": ADMIN_TOKEN,
         "Content-Type": "application/json",
         "Accept": "application/json",
-        # if Render adds gzip by default, fine
         "User-Agent": "shopify-auto-import/1.0",
     })
 
@@ -61,38 +59,6 @@ def _api_post(path, payload):
     r = S.post(url, json=payload, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
-
-def _api_put(path, payload):
-    if not SHOP:
-        raise RuntimeError("SHOPIFY_STORE env is empty")
-    url = f"https://{SHOP}.myshopify.com/admin/api/{API_VERSION}{path}"
-    r = S.put(url, json=payload, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
-
-# GraphQL (for metafield definition create fallback)
-def _gql(query: str, variables=None):
-    """Shopify Admin GraphQL 호출 (에러시 바디 포함)"""
-    if not SHOP:
-        raise RuntimeError("SHOPIFY_STORE env is empty")
-    url = f"https://{SHOP}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
-    headers = S.headers.copy()
-    headers["Content-Type"] = "application/json"
-    try:
-        r = requests.post(url, headers=headers, json={"query": query, "variables": variables or {}}, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-    except requests.HTTPError as he:
-        text = he.response.text if he.response is not None else ""
-        raise RuntimeError(f"graphql_http_error {he} body={text[:500]}")
-
-# ─────────────────────────────────────────────────────────────
-# Google Search Console ENV
-# ─────────────────────────────────────────────────────────────
-GSC_SITE = os.environ.get("GSC_SITE", "").strip()            # 예: https://jeffsfavoritepicks.com/
-GSC_SA_JSON_B64 = os.environ.get("GSC_SA_JSON_B64", "").strip()
-GSC_MIN_IMPRESSIONS = int(os.environ.get("GSC_MIN_IMPRESSIONS", "100"))
-GSC_LIMIT = int(os.environ.get("GSC_LIMIT", "20"))
 
 # ─────────────────────────────────────────────────────────────
 # 리포트 저장소
@@ -301,70 +267,6 @@ table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #e5e5e5;padd
 <h3>📈 CTR Trend (최근 10일)</h3><img src="{chart_url}" width="600"/>
 <p style="color:#777;font-size:12px">Generated {datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")}</p>"""
     return Response(html, mimetype="text/html")
-
-# ─────────────────────────────────────────────────────────────
-# Google Search Console: 하위 CTR 추출
-# ─────────────────────────────────────────────────────────────
-def _gsc_creds():
-    if not GSC_SA_JSON_B64:
-        raise RuntimeError("GSC_SA_JSON_B64 missing")
-    data = json.loads(base64.b64decode(GSC_SA_JSON_B64).decode("utf-8"))
-    return service_account.Credentials.from_service_account_info(
-        data, scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
-    )
-
-def gsc_query_low_ctr(site_url: str, start_date: str, end_date: str,
-                      min_impr: int = GSC_MIN_IMPRESSIONS, limit: int = GSC_LIMIT):
-    """
-    GSC에서 페이지 차원의 클릭/노출/CTR/포지션을 가져와
-    - 노출 수 >= min_impr
-    - CTR 오름차순(낮은 값 우선), 동일 시 노출 많은 순
-    로 정렬해 상위 limit개 반환
-    """
-    creds = _gsc_creds()
-    svc = build("searchconsole", "v1", credentials=creds)
-    body = {
-        "startDate": start_date,
-        "endDate": end_date,
-        "dimensions": ["page"],
-        "rowLimit": 25000,
-    }
-    resp = svc.searchanalytics().query(siteUrl=site_url, body=body).execute()
-    rows = resp.get("rows", []) or []
-    rows = [
-        {
-            "page": r["keys"][0],
-            "clicks": r.get("clicks", 0),
-            "impressions": r.get("impressions", 0),
-            "ctr": r.get("ctr", 0.0),
-            "position": r.get("position", 0.0),
-        }
-        for r in rows
-        if r.get("impressions", 0) >= min_impr
-    ]
-    rows.sort(key=lambda x: (x["ctr"], -x["impressions"]))
-    return rows[:limit]
-
-@app.get("/seo/gsc/low-ctr")
-def seo_gsc_low_ctr():
-    """
-    예: /seo/gsc/low-ctr?auth=jeffshopsecure
-    최근 28일 CTR 하위 N개(기본 20) 반환
-    """
-    if not _authorized():
-        return _unauth()
-    if not GSC_SITE:
-        return jsonify({"ok": False, "error": "GSC_SITE missing"}), 400
-    try:
-        today = datetime.date.today()
-        start = (today - datetime.timedelta(days=28)).isoformat()
-        end = (today - datetime.timedelta(days=1)).isoformat()
-        items = gsc_query_low_ctr(GSC_SITE, start, end)
-        _append_row({"event": "gsc_low_ctr", "start": start, "end": end, "count": len(items)})
-        return jsonify({"ok": True, "start": start, "end": end, "count": len(items), "items": items})
-    except Exception as e:
-        logging.exception("seo_gsc_low_ctr failed")
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
 # SEO/임포트 실행부
@@ -599,7 +501,7 @@ def report_last_updated_products():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ①: 사이드카 사이트맵 (products)  — /sitemap-products.xml
+# Sitemap (products)  — /sitemap-products.xml
 # ─────────────────────────────────────────────────────────────
 @app.get("/sitemap-products.xml")
 def sitemap_products():
@@ -637,7 +539,7 @@ def sitemap_products():
         return Response(f"<!-- error: {e} -->", mimetype="application/xml", status=500)
 
 # ─────────────────────────────────────────────────────────────
-# NEW ②: 사이트맵 Ping  — GET/POST /sitemap/ping?auth=...
+# Sitemap Ping  — GET/POST /sitemap/ping?auth=...
 # ─────────────────────────────────────────────────────────────
 @app.route("/sitemap/ping", methods=["GET", "POST"])
 def sitemap_ping():
@@ -655,7 +557,8 @@ def sitemap_ping():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ③: SEO Rewrite  — POST /seo/rewrite?limit=10&dry_run=true
+# SEO Rewrite  — POST /seo/rewrite?limit=10&dry_run=true
+# (최근 활성 상품 N개)
 # ─────────────────────────────────────────────────────────────
 @app.post("/seo/rewrite")
 def seo_rewrite():
@@ -692,266 +595,272 @@ def seo_rewrite():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW ④: FAQ JSON-LD (custom.faq_json)
+# NEW: GSC CSV 업로드 & Low-CTR 추출
 # ─────────────────────────────────────────────────────────────
-FAQ_NAMESPACE = "custom"
-FAQ_KEY = "faq_json"
+GSC_CSV_PATH = "/tmp/gsc_latest.csv"
 
-def _ensure_faq_definition():
-    """
-    custom.faq_json 메타필드 정의 존재 확인 → 없으면 GraphQL로 생성 시도.
-    (REST가 404/400/406을 줄 수 있어 단계적 탐색 + GraphQL 생성으로 대응)
-    실패/미지원이어도 제품 메타필드는 동작하므로, 최종적으로는 ok=True with 'skipped'를 반환.
-    """
-    result = {"ok": False, "created": False, "definition": None, "mode": None, "tried": [], "skipped_reason": None}
+def _url_to_handle(url: str):
     try:
-        # 1) REST로 존재 여부 탐색
-        tries = [
-            {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY, "owner_types[]": "product"},
-            {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY},
-            {"namespace": FAQ_NAMESPACE},
-            {},
-        ]
-        for params in tries:
-            result["tried"].append({"rest_query": params})
-            try:
-                data = _api_get("/metafield_definitions.json", params=params)
-            except requests.HTTPError as he:
-                # 정의 목록이 차단된 플랜/퍼미션/버전일 수 있음 → 계속 시도
-                continue
-            defs = data.get("metafield_definitions", []) or []
-            for d in defs:
-                if d.get("namespace") == FAQ_NAMESPACE and d.get("key") == FAQ_KEY:
-                    ots = d.get("owner_types") or []
-                    if not ots or "product" in ots:
-                        result.update({"ok": True, "created": False, "definition": d, "mode": "rest-found"})
-                        return result
-
-        # 2) GraphQL로 생성 시도
-        mutation = """
-        mutation CreateDef($def: MetafieldDefinitionInput!) {
-          metafieldDefinitionCreate(definition: $def) {
-            createdDefinition { id name namespace key ownerType type }
-            userErrors { field message }
-          }
-        }
-        """
-        variables = {
-            "def": {
-                "name": "Product FAQ JSON",
-                "namespace": FAQ_NAMESPACE,
-                "key": FAQ_KEY,
-                "type": "json",
-                "ownerType": "PRODUCT",
-                "description": "Google FAQPage markup(JSON-LD) source for the product"
-            }
-        }
-        gj = _gql(mutation, variables)
-        payload = gj.get("data", {}).get("metafieldDefinitionCreate", {}) if isinstance(gj, dict) else {}
-        errs = (payload.get("userErrors") or [])
-        if errs:
-            # 생성이 거부되더라도 제품 메타필드는 쓸 수 있으므로 skip 처리
-            result.update({"ok": True, "created": False, "definition": None, "mode": "gql-skip", "skipped_reason": "; ".join([e.get("message","") for e in errs])})
-            return result
-        created = payload.get("createdDefinition")
-        if created:
-            result.update({"ok": True, "created": True, "definition": created, "mode": "gql-create"})
-            return result
-
-        # 그래도 없으면 '스킵'으로 성공
-        result.update({"ok": True, "created": False, "mode": "fallback-skip", "skipped_reason": "definition endpoints unavailable; product metafields still usable"})
-        return result
-    except Exception as e:
-        logging.exception("ensure_faq_definition error")
-        # 예외가 나도 실패로 만들지 않고, 스킵 성공 처리
-        result.update({"ok": True, "created": False, "mode": "exception-skip", "skipped_reason": str(e)})
-        return result
-
-def _product_by_handle(handle: str):
-    res = _api_get("/products.json", params={"handle": handle, "fields": "id,title,handle,status,published_at"})
-    prods = res.get("products", []) or []
-    return prods[0] if prods else None
-
-def _ensure_product_id(item: dict):
-    """item: {'id':..., 'handle':...} 둘 중 하나를 허용"""
-    if item.get("id"):
-        return int(item["id"])
-    if item.get("handle"):
-        p = _product_by_handle(item["handle"])
-        if not p:
-            raise RuntimeError(f"product_not_found: handle={item['handle']}")
-        return int(p["id"])
-    raise RuntimeError("item must contain 'id' or 'handle'")
-
-def _normalize_qas(qas):
-    """
-    qas: [["Q","A"], ...] 또는 [{"q":"...","a":"..."}] → JSON-LD 구조
-    """
-    out = []
-    if not qas:
-        return out
-    if isinstance(qas, list):
-        for x in qas:
-            if isinstance(x, (list, tuple)) and len(x) >= 2:
-                q, a = str(x[0]).strip(), str(x[1]).strip()
-                if q and a:
-                    out.append({"@type":"Question","name":q,"acceptedAnswer":{"@type":"Answer","text":a}})
-            elif isinstance(x, dict):
-                q, a = str(x.get("q","")).strip(), str(x.get("a","")).strip()
-                if q and a:
-                    out.append({"@type":"Question","name":q,"acceptedAnswer":{"@type":"Answer","text":a}})
-    return out
-
-def _faq_json_ld_from_qas(title: str, qas):
-    items = _normalize_qas(qas)
-    return {
-        "@context": "https://schema.org",
-        "@type": "FAQPage",
-        "mainEntity": items,
-        "about": title
-    }
-
-def _get_existing_faq_metafield(product_id: int):
-    try:
-        res = _api_get(f"/products/{product_id}/metafields.json", params={"namespace": FAQ_NAMESPACE, "key": FAQ_KEY})
-        lst = res.get("metafields", []) or []
-        return lst[0] if lst else None
-    except Exception:
+        m = re.search(r"/products/([a-z0-9\-]+)/?", url)
+        return m.group(1) if m else None
+    except:
         return None
 
-def _set_product_faq_json(product_id: int, json_value: dict, dry_run=False):
-    """
-    products/{id}/metafields REST 사용
-    - 있으면 PUT /metafields/{id}.json
-    - 없으면 POST /products/{id}/metafields.json
-    """
-    value_str = json.dumps(json_value, ensure_ascii=False)
-    if dry_run:
-        return {"dry_run": True, "product_id": product_id, "value": json_value}
+@app.post("/gsc/low-ctr/upload")
+def gsc_upload():
+    if not _authorized():
+        return _unauth()
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "no_file"}), 400
+    f.save(GSC_CSV_PATH)
+    return jsonify({"ok": True, "saved": GSC_CSV_PATH})
 
-    existing = _get_existing_faq_metafield(product_id)
-    if existing and existing.get("id"):
-        mid = existing["id"]
-        payload = {"metafield": {"id": mid, "value": value_str, "type": "json"}}
-        _api_put(f"/metafields/{mid}.json", payload)
-        return {"updated": True, "metafield_id": mid, "product_id": product_id}
-    else:
-        payload = {"metafield": {"namespace": FAQ_NAMESPACE, "key": FAQ_KEY, "type": "json", "value": value_str}}
-        res = _api_post(f"/products/{product_id}/metafields.json", payload)
-        mf = res.get("metafield", {})
-        return {"created": True, "metafield_id": mf.get("id"), "product_id": product_id}
+@app.get("/gsc/low-ctr/list")
+def gsc_list():
+    if not _authorized():
+        return _unauth()
+    max_ctr = float(request.args.get("ctr_max", "1.5"))
+    min_impr = int(request.args.get("impr_min", "200"))
+    limit = int(request.args.get("limit", "20"))
+
+    if not pathlib.Path(GSC_CSV_PATH).exists():
+        return jsonify({"ok": False, "error": "no_csv_uploaded"}), 400
+
+    rows = []
+    with open(GSC_CSV_PATH, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            page = r.get("Page") or r.get("Page URL") or r.get("page") or ""
+            ctr_s = (r.get("CTR") or r.get("Click-through rate") or r.get("ctr") or "").replace("%","").strip()
+            imp_s = (r.get("Impressions") or r.get("impressions") or r.get("Impr") or "0").replace(",","").strip()
+            try:
+                ctr = float(ctr_s)
+                imp = int(imp_s)
+            except:
+                continue
+            if ctr <= max_ctr and imp >= min_impr:
+                handle = _url_to_handle(page or "")
+                if handle:
+                    rows.append({"page": page, "handle": handle, "ctr": ctr, "impressions": imp})
+
+    agg = {}
+    for r in rows:
+        h = r["handle"]
+        cur = agg.get(h, {"handle": h, "impressions": 0, "best_ctr": r["ctr"], "page": r["page"]})
+        cur["impressions"] += r["impressions"]
+        cur["best_ctr"] = min(cur["best_ctr"], r["ctr"])
+        cur["page"] = r["page"]
+        agg[h] = cur
+
+    out = sorted(agg.values(), key=lambda x: (-x["impressions"], x["best_ctr"]))[:limit]
+    return jsonify({"ok": True, "count": len(out), "items": out, "params": {"ctr_max": max_ctr, "impr_min": min_impr, "limit": limit}})
+
+# ─────────────────────────────────────────────────────────────
+# NEW: Admin GraphQL helper + 지정 핸들만 리라이트
+# ─────────────────────────────────────────────────────────────
+def _admin_graphql(query: str, variables=None):
+    if not SHOP:
+        raise RuntimeError("SHOPIFY_STORE env is empty")
+    url = f"https://{SHOP}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
+    headers = S.headers.copy()
+    headers["Content-Type"] = "application/json"
+    r = requests.post(url, json={"query": query, "variables": variables or {}}, headers=headers, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    if "errors" in data:
+        raise RuntimeError(f"GraphQL errors: {data['errors']}")
+    return data
+
+def _product_id_by_handle(handle: str):
+    q = """
+    query($h: String!){
+      productByHandle(handle: $h){ id handle title }
+    }
+    """
+    data = _admin_graphql(q, {"h": handle})
+    node = (((data or {}).get("data") or {}).get("productByHandle") or None)
+    if not node:
+        return None
+    gid = node["id"]  # gid://shopify/Product/1234567890
+    try:
+        return int(gid.split("/")[-1])
+    except:
+        return None
+
+@app.post("/seo/rewrite/by-handles")
+def seo_rewrite_by_handles():
+    if not _authorized():
+        return _unauth()
+    body = request.get_json(silent=True) or {}
+    handles = body.get("handles") or []
+    dry = bool(body.get("dry_run", False))
+    if not handles:
+        return jsonify({"ok": False, "error": "empty_handles"}), 400
+
+    changed, errors = [], []
+    for h in handles:
+        pid = _product_id_by_handle(h)
+        if not pid:
+            errors.append({"handle": h, "error": "id_not_found"}); continue
+
+        base = (h.replace("-", " ").title())[:40]
+        title_tag = f"{base} | Jeff’s Favorite Picks"
+        desc_tag = "Fast shipping, easy returns, quality guaranteed. Grab yours today."
+
+        if dry:
+            changed.append({"id": pid, "handle": h, "title": title_tag, "description": desc_tag, "dry_run": True})
+            continue
+
+        try:
+            _api_post(f"/products/{pid}.json", {
+                "product": {
+                    "id": pid,
+                    "metafields_global_title_tag": title_tag,
+                    "metafields_global_description_tag": desc_tag
+                }
+            })
+            _append_row({"event": "seo_rewrite", "product_id": pid, "handle": h, "title": title_tag})
+            changed.append({"id": pid, "handle": h, "ok": True})
+        except Exception as e:
+            errors.append({"handle": h, "error": str(e)})
+
+    return jsonify({"ok": True, "count": len(changed), "items": changed, "errors": errors, "dry_run": dry})
+
+# ─────────────────────────────────────────────────────────────
+# NEW: FAQ JSON 메타필드 부트스트랩 & JSON-LD 미리보기
+# (REST로 제품별 메타필드 생성 — 정의 없어도 동작)
+# ─────────────────────────────────────────────────────────────
+DEFAULT_FAQ = [
+    {"question": "배송은 얼마나 걸리나요?", "answer": "보통 2~5영업일 내 도착합니다."},
+    {"question": "교환/반품이 가능한가요?", "answer": "수령 후 14일 이내 가능합니다. 간단한 사유와 함께 문의 주세요."},
+]
+
+def _get_product_by_handle(handle: str):
+    try:
+        res = _api_get("/products.json", params={"handle": handle})
+        # handle 필터가 REST에 직접 없을 수 있어 전체에서 찾기
+        for p in res.get("products", []):
+            if p.get("handle") == handle:
+                return p
+        # 보조: 목록에서 스캔
+        res2 = _api_get("/products.json", params={"limit": 250})
+        for p in res2.get("products", []):
+            if p.get("handle") == handle:
+                return p
+    except:
+        pass
+    return None
+
+def _get_faq_metafield(product_id: int):
+    # /products/{id}/metafields.json 로드 후 namespace/key 매칭
+    try:
+        mres = _api_get(f"/products/{product_id}/metafields.json")
+        for m in mres.get("metafields", []):
+            if m.get("namespace") == "custom" and m.get("key") == "faq_json":
+                return m
+    except Exception as e:
+        logging.warning("get_faq_metafield error for %s: %s", product_id, e)
+    return None
+
+def _set_faq_metafield(product_id: int, faq_list):
+    # value는 문자열(JSON)로, type은 json
+    payload = {
+        "metafield": {
+            "namespace": "custom",
+            "key": "faq_json",
+            "type": "json",
+            "value": json.dumps(faq_list, ensure_ascii=False)
+        }
+    }
+    try:
+        return _api_post(f"/products/{product_id}/metafields.json", payload)
+    except Exception as e:
+        # 이미 존재하는 경우 업데이트로 재시도
+        existing = _get_faq_metafield(product_id)
+        if existing:
+            mf_id = existing.get("id")
+            try:
+                return _api_post(f"/metafields/{mf_id}.json", {
+                    "metafield": {"id": mf_id, "value": json.dumps(faq_list, ensure_ascii=False)}
+                })
+            except Exception as e2:
+                raise e2
+        raise e
 
 @app.get("/seo/faq/bootstrap")
 def faq_bootstrap():
-    if not _authorized(): return _unauth()
-    out = _ensure_faq_definition()
-    # 항상 200 응답으로 진단정보 표시 (정의가 없어도 apply는 동작)
-    return jsonify(out), 200
+    if not _authorized():
+        return _unauth()
+    dry = (request.args.get("dry_run") or "").lower() in ("1","true","yes")
+    limit = int(request.args.get("limit", "20"))
+    # 활성 상품 대상
+    res = _api_get("/products.json", params={"limit": max(50, limit), "fields": "id,handle,title,status,published_at"})
+    targets = [p for p in res.get("products", []) if p.get("status")=="active" and p.get("published_at")][:limit]
 
-@app.get("/seo/faq/defs/debug")
-def faq_defs_debug():
-    """정의 조회가 가능한 환경이면 목록을 반환 (디버그용)"""
-    if not _authorized(): return _unauth()
-    try:
-        data = _api_get("/metafield_definitions.json", params={"namespace": FAQ_NAMESPACE})
-        return jsonify({"ok": True, "data": data})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 200  # 디버그용이므로 200
-
-@app.get("/seo/faq/apply")
-def faq_apply_dryrun():
-    """
-    드라이런: 최근 활성상품 중 limit개에 샘플 FAQ JSON-LD를 계산해서 반환만 함.
-    /seo/faq/apply?auth=...&limit=5&dry_run=true (GET)
-    """
-    if not _authorized(): return _unauth()
-    limit = int(request.args.get("limit", 5))
-    dry = (request.args.get("dry_run") or "true").lower() in ("1","true","yes")
-
-    boot = _ensure_faq_definition()  # 실패해도 ok True로 스킵 처리됨
-    res = _api_get("/products.json", params={"limit": max(10, limit), "fields": "id,title,handle,status,published_at"})
-    products = [p for p in res.get("products", []) if p.get("status")=="active" and p.get("published_at")][:limit]
-    items = []
-    for p in products:
-        faq = _faq_json_ld_from_qas(p.get("title") or "", [
-            ["배송 기간은 얼마나 걸리나요?", "보통 2~5 영업일 내 도착합니다."],
-            ["반품/교환이 가능한가요?", "수령 후 14일 이내 미사용/미개봉 상태에서 가능합니다."]
-        ])
+    created, skipped, errors = [], [], []
+    for p in targets:
+        pid = p["id"]; handle = p.get("handle")
+        mf = _get_faq_metafield(pid)
+        if mf:
+            skipped.append({"id": pid, "handle": handle})
+            continue
         if dry:
-            items.append({"id": p["id"], "handle": p["handle"], "faq": faq, "dry_run": True})
-        else:
-            apply_res = _set_product_faq_json(int(p["id"]), faq, dry_run=False)
-            items.append({"id": p["id"], "handle": p["handle"], **apply_res})
-
-    return jsonify({"ok": True, "bootstrap": boot, "count": len(items), "items": items, "dry_run": dry})
-
-@app.post("/seo/faq/apply")
-def faq_apply_post():
-    """
-    실제 적용:
-    Body:
-    {
-      "dry_run": false,
-      "items": [
-        {"handle":"xxx", "qas":[["Q","A"], ["Q2","A2"]]},
-        {"id": 1234567890, "qas":[{"q":"...","a":"..."}]}
-      ]
-    }
-    """
-    if not _authorized(): return _unauth()
-    body = request.get_json(silent=True) or {}
-    dry = bool(body.get("dry_run", False))
-    items = body.get("items") or []
-    if not items:
-        return jsonify({"ok": False, "error": "empty_items"}), 400
-
-    boot = _ensure_faq_definition()  # 정의 없어도 진행
-    results = []
-    for it in items:
+            created.append({"id": pid, "handle": handle, "dry_run": True}); continue
         try:
-            pid = _ensure_product_id(it)
-            pinfo = _api_get(f"/products/{pid}.json").get("product", {})
-            title = pinfo.get("title", "")
-            faq = _faq_json_ld_from_qas(title, it.get("qas") or [])
-            resu = _set_product_faq_json(pid, faq, dry_run=dry)
-            results.append({"ok": True, "id": pid, **resu})
-            if not dry:
-                _append_row({"event": "faq_apply", "product_id": pid, "count_qas": len(faq.get("mainEntity", []))})
+            _set_faq_metafield(pid, DEFAULT_FAQ)
+            created.append({"id": pid, "handle": handle, "ok": True})
         except Exception as e:
-            logging.exception("faq_apply_post item error")
-            results.append({"ok": False, "error": str(e), "item": it})
+            errors.append({"id": pid, "handle": handle, "error": str(e)})
 
-    return jsonify({"ok": True, "dry_run": dry, "bootstrap": boot, "results": results})
+    return jsonify({"ok": True, "created": created, "skipped": skipped, "errors": errors, "dry_run": dry})
 
-@app.get("/seo/faq/preview")
-def faq_preview():
-    """
-    상품의 현재 FAQ JSON-LD 메타필드/미리보기
-    - handle 또는 id 파라미터 사용
-    """
-    if not _authorized(): return _unauth()
-    handle = request.args.get("handle")
-    pid = request.args.get("id")
-    try:
-        if handle and not pid:
-            p = _product_by_handle(handle)
-            if not p: return jsonify({"ok": False, "error": "product_not_found"}), 404
-            pid = p["id"]
-        pid = int(pid)
-    except Exception:
-        return jsonify({"ok": False, "error": "need handle or id"}), 400
+@app.get("/seo/faq/jsonld")
+def faq_jsonld():
+    """제품 handle을 받아 JSON-LD FAQPage 스니펫 생성(메타필드 기반, 없으면 기본)"""
+    if not _authorized():
+        return _unauth()
+    handle = request.args.get("handle", "").strip()
+    if not handle:
+        return jsonify({"ok": False, "error": "missing_handle"}), 400
 
-    mf = _get_existing_faq_metafield(pid)
-    parsed = None
-    if mf and mf.get("value"):
+    product = _get_product_by_handle(handle)
+    if not product:
+        return jsonify({"ok": False, "error": "product_not_found"}), 404
+
+    pid = product["id"]
+    mf = _get_faq_metafield(pid)
+    faq_list = DEFAULT_FAQ
+    if mf:
         try:
-            parsed = json.loads(mf["value"])
+            val = mf.get("value")
+            if isinstance(val, str):
+                faq_list = json.loads(val)
+            elif isinstance(val, list):
+                faq_list = val
         except Exception:
-            parsed = {"raw": mf["value"]}
-    return jsonify({"ok": True, "product_id": pid, "metafield": mf, "faq": parsed})
+            pass
+
+    items = []
+    for qa in faq_list:
+        q = qa.get("question") or ""
+        a = qa.get("answer") or ""
+        items.append({
+            "@type": "Question",
+            "name": q,
+            "acceptedAnswer": {"@type": "Answer", "text": a}
+        })
+
+    ld = {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": items
+    }
+    body = json.dumps(ld, ensure_ascii=False, separators=(",", ":"))
+    return Response(body, mimetype="application/ld+json")
 
 # ─────────────────────────────────────────────────────────────
-# TEST UI — /tests (buttons that mirror your curl examples)
+# TEST UI — /tests
 # ─────────────────────────────────────────────────────────────
 TEST_HTML = """
 <!doctype html>
@@ -998,13 +907,15 @@ TEST_HTML = """
   <pre id="out5"></pre>
 </div>
 <div class="card">
-  <h3>6) FAQ 부트스트랩 (메타필드 정의)</h3>
-  <button onclick="go('/seo/faq/bootstrap', 'GET', true)">GET /seo/faq/bootstrap?auth=...</button>
+  <h3>6) FAQ 부트스트랩 (드라이런)</h3>
+  <button onclick="go('/seo/faq/bootstrap?limit=10&dry_run=true', 'GET', true)">GET /seo/faq/bootstrap?limit=10&dry_run=true&auth=...</button>
   <pre id="out6"></pre>
 </div>
 <div class="card">
-  <h3>7) FAQ 샘플 드라이런</h3>
-  <button onclick="go('/seo/faq/apply?limit=3&dry_run=true', 'GET', true)">GET /seo/faq/apply?limit=3&dry_run=true&auth=...</button>
+  <h3>7) GSC CSV 업로드 & Low-CTR</h3>
+  <input type="file" id="csvFile">
+  <button onclick="uploadCSV()">POST /gsc/low-ctr/upload</button>
+  <button onclick="go('/gsc/low-ctr/list', 'GET', true)">GET /gsc/low-ctr/list?auth=...</button>
   <pre id="out7"></pre>
 </div>
 <script>
@@ -1020,20 +931,26 @@ async function go(path, method='GET', needsAuth=false){
     const txt = await res.text();
     let out = txt;
     try{ out = JSON.stringify(JSON.parse(txt), null, 2); }catch{}
-    const map={
-      '/health':'out1',
-      '/sitemap-products.xml':'out2',
-      '/sitemap/ping':'out3',
-      '/seo/rewrite?limit=5&dry_run=true':'out4',
-      '/seo/rewrite?limit=5':'out5',
-      '/seo/faq/bootstrap':'out6',
-      '/seo/faq/apply':'out7'
-    }
+    const map={'/health':'out1','/sitemap-products.xml':'out2','/sitemap/ping':'out3',
+               '/seo/rewrite?limit=5&dry_run=true':'out4','/seo/rewrite?limit=5':'out5',
+               '/seo/faq/bootstrap':'out6','/gsc/low-ctr/list':'out7'}
     const key = Object.keys(map).find(k=>path.startsWith(k.split('?')[0]));
     el(map[key]||'out1').textContent = out;
   }catch(e){
     alert('요청 실패: '+e);
   }
+}
+
+async function uploadCSV(){
+  const base=b(); const auth=a();
+  const f = el('csvFile').files[0];
+  if(!f){ alert('CSV 파일을 선택하세요'); return; }
+  const fd = new FormData(); fd.append('file', f);
+  const url = base + '/gsc/low-ctr/upload?auth=' + encodeURIComponent(auth);
+  const res = await fetch(url, { method: 'POST', body: fd });
+  const txt = await res.text();
+  try{ el('out7').textContent = JSON.stringify(JSON.parse(txt), null, 2); }
+  catch{ el('out7').textContent = txt; }
 }
 </script>
 """
@@ -1051,3 +968,4 @@ print("[BOOT] main.py loaded successfully")
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
