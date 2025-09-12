@@ -1,4 +1,4 @@
-# main.py — Unified (Existing features + New endpoints)
+# main.py — Unified (Existing features + New endpoints, with PUT fixes)
 # Features:
 # - Dashboard & reports
 # - Inventory check/sync
@@ -593,7 +593,7 @@ def seo_rewrite():
                 continue
 
             payload = {"product": {"id": pid, "metafields_global_title_tag": title_tag, "metafields_global_description_tag": desc_tag}}
-            _api_post(f"/products/{pid}.json", payload)
+            _api_put(f"/products/{pid}.json", payload)  # FIX: PUT for update
             rec = {"event": "seo_rewrite", "product_id": pid, "handle": p.get("handle"), "title": title_tag, "description": desc_tag}
             _append_row(rec)
             changed.append(rec)
@@ -721,7 +721,7 @@ def seo_rewrite_by_handles():
             continue
 
         try:
-            _api_post(f"/products/{pid}.json", {
+            _api_put(f"/products/{pid}.json", {  # FIX: PUT for update
                 "product": {
                     "id": pid,
                     "metafields_global_title_tag": title_tag,
@@ -778,21 +778,20 @@ def _set_faq_metafield(product_id: int, faq_list):
         }
     }
     try:
-        # 없으면 생성 (product scope)
         return _api_post(f"/products/{product_id}/metafields.json", payload)
     except Exception:
-        # 있으면 업데이트 (PUT /metafields/{id}.json)
+        # 이미 존재하는 경우 업데이트로 재시도 (PUT)
         existing = _get_faq_metafield(product_id)
-        if not existing:
-            raise
-        mf_id = existing.get("id")
-        return _api_put(f"/metafields/{mf_id}.json", {
-            "metafield": {
-                "id": mf_id,
-                "type": "json",
-                "value": json.dumps(faq_list, ensure_ascii=False)
-            }
-        })
+        if existing:
+            mf_id = existing.get("id")
+            return _api_put(f"/metafields/{mf_id}.json", {  # FIX: PUT + type 유지
+                "metafield": {
+                    "id": mf_id,
+                    "type": "json",
+                    "value": json.dumps(faq_list, ensure_ascii=False)
+                }
+            })
+        raise
 
 @app.get("/seo/faq/bootstrap")
 def faq_bootstrap():
@@ -973,5 +972,6 @@ print("[BOOT] main.py loaded successfully")
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
