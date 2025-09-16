@@ -249,7 +249,7 @@ def reports_weekly_json():
     _save_json(WEEKLY_REPORT_FILE,rep); _append_row({"event":"report_weekly","ok":True,"count":rep["count"]})
     return jsonify({"ok":True,"report":rep})
 
-@app.get("/report/daily")  # 기존 HTML 일일요약 유지
+@app.get("/report/daily")  # 기존 HTML 일간요약 유지
 def report_daily_html():
     rows=_load_rows(limit=30); today=rows[-1] if rows else {}; date_str=today.get("date", datetime.date.today().isoformat())
     perf=today.get("perf",0); acc=today.get("acc",0); bp=today.get("bp",0); seo=today.get("seo",0)
@@ -314,7 +314,7 @@ def run_seo():
     Thread(target=run_import_and_seo, kwargs={"kwargs": {}}, daemon=True).start()
     return jsonify({"ok": True, "status": "queued", "job": "run_seo"}), 202
 
-@app.get("/seo/run")  # 별칭 유지
+@app.get("/seo/run")  # 별칭 유지 (rotate 파라미터는 /seo/optimize에서 사용)
 def seo_run_alias():
     if not _authorized(): return _unauth()
     dry_q = (request.args.get("dry") or request.args.get("simulate") or "").lower()
@@ -401,7 +401,6 @@ def report_recent_products():
     except Exception as e:
         logging.exception("report_recent_products error"); return jsonify({"ok": False, "error": str(e)}), 500
 
-LAST_RUN_TS = None
 @app.get("/report/last-run-products")
 def report_last_run_products():
     if not _authorized(): return _unauth()
@@ -461,13 +460,11 @@ def sitemap_products():
     except Exception as e:
         return Response(f"<!-- error: {e} -->", mimetype="application/xml", status=500)
 
-# Sitemap Ping — GET/POST /sitemap/ping (기존 유지, 내부 ping URL 보완)
+# Sitemap Ping — GET/POST /sitemap/ping
 @app.route("/sitemap/ping", methods=["GET","POST"])
 def sitemap_ping():
     if not _authorized(): return _unauth()
-    # 외부에서 접근 가능한 절대 URL 구성(호스트 신뢰 불가 시 myshopify 기준으로 fallback)
     base = request.url_root.rstrip("/")
-    # 기본은 현재 서버의 /sitemap-products.xml
     sitemap_url = f"{base}/sitemap-products.xml"
     ping_url = "https://www.google.com/ping?" + urlencode({"sitemap": sitemap_url})
     try:
@@ -504,7 +501,7 @@ def seo_rewrite():
         _append_row({"event":"seo_rewrite_error","error":str(e)}); return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW: GSC CSV 업로드 & Low-CTR 집계 (기존 유지)
+# NEW: GSC CSV 업로드 & Low-CTR 집계 (수정됨: 문법 에러 fix)
 # ─────────────────────────────────────────────────────────────
 def _url_to_handle(url: str):
     try:
@@ -513,9 +510,13 @@ def _url_to_handle(url: str):
 
 @app.post("/gsc/low-ctr/upload")
 def gsc_upload():
-    if not _authorized(): return _unauth()
-    f=request.files.get("file"); if not f: return jsonify({"ok": False, "error": "no_file"}), 400
-    f.save(GSC_CSV_PATH); return jsonify({"ok": True, "saved": GSC_CSV_PATH})
+    if not _authorized():
+        return _unauth()
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "no_file"}), 400
+    f.save(GSC_CSV_PATH)
+    return jsonify({"ok": True, "saved": GSC_CSV_PATH})
 
 @app.get("/gsc/low-ctr/list")
 def gsc_list():
@@ -757,7 +758,6 @@ def _update_alt_if_empty(product, kw):
     _api_put(f"/products/{product['id']}.json", {"product":{"id":product["id"],"images":updates}})
 
 def _fetch_products_for_rotation(max_count=200):
-    # 간단: updated_at asc 정렬은 Admin REST cursor가 필요. 여기서는 한 번에 200개 fetch로 대체.
     res=_api_get("/products.json", params={"limit": min(250,max_count)})
     return res.get("products", [])
 
@@ -771,9 +771,11 @@ def _select_products(limit:int):
     if not allp: return []
     rot=_load_rotator(); c=int(rot.get("cursor",0))
     sel=allp[c:c+limit]
-    if len(sel)<limit: sel+=allp[0:max(0, limit-len(sel))]; c=(c+limit)%len(allp)
+    if len(sel)<limit:
+        sel+=allp[0:max(0, limit-len(sel))]
+        c=(c+limit)%len(allp)
     else:
-        c+=limit; 
+        c+=limit
         if c>=len(allp): c%=len(allp)
     rot["cursor"]=c; _save_rotator(rot); return sel
 
@@ -792,7 +794,9 @@ def seo_optimize_rotate():
     try:
         km=_load_json(KEYWORD_MAP_FILE, None) or _build_keyword_map(); _save_keyword_map(km)
         products=_select_products(limit) if rotate else _fetch_products_for_rotation(limit)
-        if not products: _append_row({"event":"seo_optimize","ok":False,"reason":"no_products"}); return jsonify({"ok":False,"reason":"no_products"})
+        if not products:
+            _append_row({"event":"seo_optimize","ok":False,"reason":"no_products"})
+            return jsonify({"ok":False,"reason":"no_products"})
         results=[]
         for p in products:
             pid=p["id"]; kw=_pick_kw(p, km); title,desc,handle=_meta_for(p, kw)
@@ -817,6 +821,7 @@ def seo_optimize_rotate():
 print("[BOOT] main.py loaded successfully")
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
