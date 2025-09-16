@@ -521,8 +521,13 @@ def gsc_upload():
 @app.get("/gsc/low-ctr/list")
 def gsc_list():
     if not _authorized(): return _unauth()
-    max_ctr=float(request.args.get("ctr_max","1.5")); min_impr=int(request.args.get("impr_min","200")); limit=int(request.args.get("limit","20"))
-    if not pathlib.Path(GSC_CSV_PATH).exists(): return jsonify({"ok": False, "error": "no_csv_uploaded"}), 400
+    max_ctr=float(request.args.get("ctr_max","1.5"))
+    min_impr=int(request.args.get("impr_min","200"))
+    limit=int(request.args.get("limit","20"))
+
+    if not pathlib.Path(GSC_CSV_PATH).exists():
+        return jsonify({"ok": False, "error": "no_csv_uploaded"}), 400
+
     rows=[]
     with open(GSC_CSV_PATH,"r",encoding="utf-8-sig") as f:
         reader=csv.DictReader(f)
@@ -530,14 +535,25 @@ def gsc_list():
             page=r.get("Page") or r.get("Page URL") or r.get("page") or ""
             ctr_s=(r.get("CTR") or r.get("Click-through rate") or r.get("ctr") or "").replace("%","").strip()
             imp_s=(r.get("Impressions") or r.get("impressions") or r.get("Impr") or "0").replace(",","").strip()
-            try: ctr=float(ctr_s); imp=int(imp_s)
-            except: continue
+            try:
+                ctr=float(ctr_s)
+                imp=int(imp_s)
+            except:
+                continue
             if ctr<=max_ctr and imp>=min_impr:
-                h=_url_to_handle(page or ""); if h: rows.append({"page":page,"handle":h,"ctr":ctr,"impressions":imp})
+                h = _url_to_handle(page or "")
+                if h:
+                    rows.append({"page":page,"handle":h,"ctr":ctr,"impressions":imp})
+
     agg={}
     for r in rows:
-        h=r["handle"]; cur=agg.get(h,{"handle":h,"impressions":0,"best_ctr":r["ctr"],"page":r["page"]})
-        cur["impressions"]+=r["impressions"]; cur["best_ctr"]=min(cur["best_ctr"], r["ctr"]); cur["page"]=r["page"]; agg[h]=cur
+        h=r["handle"]
+        cur=agg.get(h,{"handle":h,"impressions":0,"best_ctr":r["ctr"],"page":r["page"]})
+        cur["impressions"]+=r["impressions"]
+        cur["best_ctr"]=min(cur["best_ctr"], r["ctr"])
+        cur["page"]=r["page"]
+        agg[h]=cur
+
     out=sorted(agg.values(), key=lambda x: (-x["impressions"], x["best_ctr"]))[:limit]
     return jsonify({"ok": True, "count": len(out), "items": out, "params": {"ctr_max": max_ctr, "impr_min": min_impr, "limit": limit}})
 
@@ -821,6 +837,7 @@ def seo_optimize_rotate():
 print("[BOOT] main.py loaded successfully")
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 
 
