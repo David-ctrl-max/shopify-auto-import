@@ -1,13 +1,25 @@
-# main.py — Unified Pro (Keep all existing + add keyword map, rotating SEO optimize, ALT fix, sitemap rebuild/ping, daily/weekly reports)
-# Auth: IMPORT_AUTH_TOKEN (default: jeffshopsecure)
-# Shopify: SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
-# New optional env:
+# main.py — Unified Pro (keyword map, rotating SEO optimize, ALT fix,
+# sitemap rebuild + Bing ping + robots.txt, optional GSC sitemaps.submit,
+# daily/weekly reports)
+#
+# Auth:
+#   IMPORT_AUTH_TOKEN (default: jeffshopsecure)
+#
+# Shopify:
+#   SHOPIFY_STORE, SHOPIFY_API_VERSION (default 2025-07), SHOPIFY_ADMIN_TOKEN
+#
+# Optional env:
 #   SEO_LIMIT=10
-#   ENABLE_SITEMAP_PING=true
-#   USE_GRAPHQL=true  (prefer GraphQL for SEO fields; REST fallback stays for compatibility)
-#   ENABLE_BING_PING=true      (Google ping deprecated; Bing only)
+#   USE_GRAPHQL=true
+#   ENABLE_SITEMAP_PING=true        (kept for backwards-compat; not used for Google)
+#   ENABLE_BING_PING=true           (Google ping deprecated; Bing only)
 #   PRIMARY_SITEMAP=https://jeffsfavoritepicks.com/sitemap.xml
 #   PUBLIC_BASE=https://shopify-auto-import.onrender.com
+#   CANONICAL_DOMAIN=jeffsfavoritepicks.com
+#   ENABLE_GSC_SITEMAP_SUBMIT=true  (optional)
+#   GSC_SITE_URL=https://jeffsfavoritepicks.com
+#   GOOGLE_SERVICE_JSON_B64=<base64 of service account JSON>  (or)
+#   GOOGLE_SERVICE_JSON_PATH=/app/sa.json
 
 import os, sys, time, json, pathlib, datetime, logging, importlib, re, csv
 from threading import Thread
@@ -18,7 +30,7 @@ import requests
 print("[BOOT] importing main.py...")
 
 # ─────────────────────────────────────────────────────────────
-# 인증 토큰 (통일: IMPORT_AUTH_TOKEN, 기본값 jeffshopsecure)
+# 인증 토큰
 # ─────────────────────────────────────────────────────────────
 AUTH_TOKEN = os.environ.get("IMPORT_AUTH_TOKEN", "jeffshopsecure").strip()
 
@@ -34,10 +46,17 @@ SEO_LIMIT = int(os.environ.get("SEO_LIMIT", "10") or "10")
 ENABLE_SITEMAP_PING = os.environ.get("ENABLE_SITEMAP_PING", "true").lower() == "true"
 USE_GRAPHQL = os.environ.get("USE_GRAPHQL", "true").lower() == "true"
 
-# NEW: sitemap/bots related flags
+# NEW: sitemap / bots / canonical / GSC 관련
 ENABLE_BING_PING = os.environ.get("ENABLE_BING_PING", "true").lower() == "true"
 PRIMARY_SITEMAP = os.environ.get("PRIMARY_SITEMAP", "https://jeffsfavoritepicks.com/sitemap.xml").strip()
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "").rstrip("/")  # e.g. https://shopify-auto-import.onrender.com
+CANONICAL_DOMAIN = os.environ.get("CANONICAL_DOMAIN", "").strip()  # e.g. jeffsfavoritepicks.com
+
+# Google Search Console 제출(선택)
+ENABLE_GSC_SITEMAP_SUBMIT = os.environ.get("ENABLE_GSC_SITEMAP_SUBMIT", "false").lower() == "true"
+GSC_SITE_URL = os.environ.get("GSC_SITE_URL", "https://jeffsfavoritepicks.com").strip()
+GOOGLE_SERVICE_JSON_B64 = os.environ.get("GOOGLE_SERVICE_JSON_B64", "").strip()
+GOOGLE_SERVICE_JSON_PATH = os.environ.get("GOOGLE_SERVICE_JSON_PATH", "").strip()
 
 S = requests.Session()
 if ADMIN_TOKEN:
@@ -144,7 +163,7 @@ def keep_alive():
     return jsonify({"status":"alive"}),200
 
 # ─────────────────────────────────────────────────────────────
-# 대시보드(브라우저 점검용) — (기존 유지)
+# 대시보드(브라우저 점검용)
 # ─────────────────────────────────────────────────────────────
 DASH_HTML = """
 <!doctype html><meta charset="utf-8"/>
@@ -198,7 +217,7 @@ def dashboard():
     return render_template_string(DASH_HTML)
 
 # ─────────────────────────────────────────────────────────────
-# Admin API 연결 점검 (기존 유지)
+# Admin API 연결 점검
 # ─────────────────────────────────────────────────────────────
 @app.get("/shopify/ping")
 def shopify_ping():
@@ -210,7 +229,7 @@ def shopify_ping():
         logging.exception("shopify_ping error"); return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# 리포트 (기존 + 확장: daily/weekly 생성기)
+# 리포트 (daily/weekly)
 # ─────────────────────────────────────────────────────────────
 @app.get("/report/add")
 def report_add():
@@ -257,7 +276,7 @@ def reports_weekly_json():
     _save_json(WEEKLY_REPORT_FILE,rep); _append_row({"event":"report_weekly","ok":True,"count":rep["count"]})
     return jsonify({"ok":True,"report":rep})
 
-@app.get("/report/daily")  # 기존 HTML 일간요약 유지
+@app.get("/report/daily")
 def report_daily_html():
     rows=_load_rows(limit=30); today=rows[-1] if rows else {}; date_str=today.get("date", datetime.date.today().isoformat())
     perf=today.get("perf",0); acc=today.get("acc",0); bp=today.get("bp",0); seo=today.get("seo",0)
@@ -283,7 +302,7 @@ def report_daily_html():
     return Response(html, mimetype="text/html")
 
 # ─────────────────────────────────────────────────────────────
-# SEO/임포트 실행부 (기존 유지: /register, /run-seo, /seo/run 별칭)
+# SEO/임포트 실행부
 # ─────────────────────────────────────────────────────────────
 from datetime import timezone, timedelta
 LAST_RUN_TS = None
@@ -322,7 +341,7 @@ def run_seo():
     Thread(target=run_import_and_seo, kwargs={"kwargs": {}}, daemon=True).start()
     return jsonify({"ok": True, "status": "queued", "job": "run_seo"}), 202
 
-@app.get("/seo/run")  # 별칭 유지 (rotate 파라미터는 /seo/optimize에서 사용)
+@app.get("/seo/run")
 def seo_run_alias():
     if not _authorized(): return _unauth()
     dry_q = (request.args.get("dry") or request.args.get("simulate") or "").lower()
@@ -336,7 +355,7 @@ def seo_run_alias():
     return jsonify({"ok": True, "status": "queued", "job": "seo_run", "args": kwargs}), 202
 
 # ─────────────────────────────────────────────────────────────
-# 재고 점검/동기화 (기존 유지)
+# 재고 점검/동기화
 # ─────────────────────────────────────────────────────────────
 @app.get("/inventory/check")
 def inventory_check():
@@ -384,9 +403,8 @@ def inventory_sync():
     return jsonify({"ok": True, "updated": updated, "errors": errors})
 
 # ─────────────────────────────────────────────────────────────
-# 최근/마지막 업데이트 리포트 (기존 유지)
+# 최근/마지막 업데이트 리포트
 # ─────────────────────────────────────────────────────────────
-
 def _iso(dt):
     if isinstance(dt,str): return dt
     if dt.tzinfo is None: dt=dt.replace(tzinfo=datetime.timezone.utc)
@@ -438,43 +456,66 @@ def report_last_updated_products():
         logging.exception("report_last_updated_products error"); return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# Sitemap (products) — 기존 동적 생성 유지
+# Helpers for Sitemap
+# ─────────────────────────────────────────────────────────────
+def _as_lastmod(iso_str: str) -> str:
+    """Normalize timestamps to UTC Z format for <lastmod>."""
+    if not iso_str:
+        return _now_iso()
+    try:
+        dt = datetime.datetime.fromisoformat(iso_str.replace("Z","+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc).isoformat().replace("+00:00","Z")
+    except:
+        return _now_iso()
+
+def _canonical_product_url(handle: str) -> str:
+    """Prefer canonical domain over myshopify."""
+    if CANONICAL_DOMAIN:
+        return f"https://{CANONICAL_DOMAIN}/products/{handle}"
+    return f"https://{SHOP}.myshopify.com/products/{handle}"
+
+# ─────────────────────────────────────────────────────────────
+# Sitemap (products) — canonical URL + lastmod 정규화
 # ─────────────────────────────────────────────────────────────
 @app.get("/sitemap-products.xml")
 def sitemap_products():
+    # 내부 확인 엔드포인트: 인증 필요(원하면 공개 전환 가능)
     if not _authorized(): return _unauth()
     try:
         data=_api_get("/products.json", params={"limit":200,"fields":"id,handle,updated_at,images,published_at,status"})
-        items=[]
+        nodes=[]
         for p in data.get("products", []):
-            if p.get("status")!="active" or not p.get("published_at"): continue
-            loc=f"https://{SHOP}.myshopify.com/products/{p['handle']}"
-            lastmod=p.get("updated_at", _now_iso())
+            if p.get("status")!="active" or not p.get("published_at"):
+                continue
+            loc=_canonical_product_url(p["handle"])
+            lastmod=_as_lastmod(p.get("updated_at") or p.get("published_at"))
             image_tags=""
             imgs=p.get("images") or []
             if imgs and imgs[0].get("src"):
-                image_tags=f"""
-    <image:image><image:loc>{imgs[0]['src']}</image:loc><image:title>{p['handle']}</image:title></image:image>"""
-            items.append(f"""
-  <url>
-    <loc>{loc}</loc>
-    <lastmod>{lastmod}</lastmod>{image_tags}
-  </url>""")
-        body=f"""<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
-        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
-{''.join(items)}
-</urlset>"""
-        return Response(body, mimetype="application/xml")
+                image_tags=(
+                    f"\n    <image:image>"
+                    f"<image:loc>{imgs[0]['src']}</image:loc>"
+                    f"<image:title>{p.get('id')}</image:title>"
+                    f"</image:image>"
+                )
+            nodes.append(f"\n  <url>\n    <loc>{loc}</loc>\n    <lastmod>{lastmod}</lastmod>{image_tags}\n  </url>")
+        body=('<?xml version="1.0" encoding="UTF-8"?>\n'
+              '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n'
+              '        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">\n'
+              f'{"".join(nodes)}\n'
+              '</urlset>')
+        resp = Response(body, mimetype="application/xml")
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
     except Exception as e:
         return Response(f"<!-- error: {e} -->", mimetype="application/xml", status=500)
 
-# robots.txt — NEW (크롤러 힌트 및 사이트맵 위치 공지)
+# robots.txt — 공개 리소스
 @app.get("/robots.txt")
 def robots_txt():
-    if not _authorized():
-        # robots.txt는 일반적으로 공개 리소스 → 비인증 접근 허용
-        pass
+    # robots.txt는 보통 공개한다(인증 없이)
     body = [
         "User-agent: *",
         "Allow: /",
@@ -489,8 +530,6 @@ def robots_txt():
 def sitemap_ping():
     if not _authorized(): return _unauth()
     target = (request.args.get("sitemap") or request.args.get("target") or PRIMARY_SITEMAP).strip()
-
-    # Google ping은 2023년부로 공식 폐기됨 → 문서화
     note = "google_ping_deprecated"
     out = {"ok": True, "sitemap": target, "note": note}
 
@@ -507,6 +546,54 @@ def sitemap_ping():
 
     _append_row({"event":"sitemap_ping", **out})
     return jsonify(out), 200
+
+# ─────────────────────────────────────────────────────────────
+# Google Search Console: sitemaps.submit (선택)
+# ─────────────────────────────────────────────────────────────
+def _gsc_build_service():
+    if not ENABLE_GSC_SITEMAP_SUBMIT:
+        return None
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = None
+        if GOOGLE_SERVICE_JSON_B64:
+            import base64, tempfile
+            raw = base64.b64decode(GOOGLE_SERVICE_JSON_B64)
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+            tf.write(raw); tf.flush()
+            creds = service_account.Credentials.from_service_account_file(tf.name, scopes=["https://www.googleapis.com/auth/webmasters"])
+        elif GOOGLE_SERVICE_JSON_PATH and os.path.exists(GOOGLE_SERVICE_JSON_PATH):
+            creds = service_account.Credentials.from_service_account_file(GOOGLE_SERVICE_JSON_PATH, scopes=["https://www.googleapis.com/auth/webmasters"])
+        else:
+            return None
+        svc = build("webmasters", "v3", credentials=creds, cache_discovery=False)
+        return svc
+    except Exception as e:
+        logging.warning("GSC service build failed: %s", e)
+        return None
+
+def _gsc_submit_sitemap(feed_url: str):
+    svc = _gsc_build_service()
+    if not svc:
+        return {"ok": False, "reason": "gsc_disabled_or_no_creds"}
+    try:
+        req = svc.sitemaps().submit(siteUrl=GSC_SITE_URL, feedpath=feed_url)
+        req.execute()
+        _append_row({"event":"gsc_sitemap_submit","ok":True,"site":GSC_SITE_URL,"feed":feed_url})
+        return {"ok": True}
+    except Exception as e:
+        logging.warning("GSC sitemaps.submit failed: %s", e)
+        _append_row({"event":"gsc_sitemap_submit","ok":False,"site":GSC_SITE_URL,"feed":feed_url,"error":str(e)[:300]})
+        return {"ok": False, "error": str(e)}
+
+@app.post("/gsc/sitemap/submit")
+def gsc_submit_manual():
+    if not _authorized(): return _unauth()
+    feed = request.args.get("feed") or PRIMARY_SITEMAP
+    res = _gsc_submit_sitemap(feed)
+    extra = {k:v for k,v in res.items() if k!='ok'}
+    return jsonify({"ok": res.get("ok", False), "feed": feed, **extra})
 
 # ─────────────────────────────────────────────────────────────
 # SEO Rewrite (기존 유지)
@@ -535,9 +622,8 @@ def seo_rewrite():
         _append_row({"event":"seo_rewrite_error","error":str(e)}); return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# NEW: GSC CSV 업로드 & Low-CTR 집계 (수정됨: 문법 에러 fix)
+# GSC CSV 업로드 & Low-CTR 집계
 # ─────────────────────────────────────────────────────────────
-
 def _url_to_handle(url: str):
     try:
         m=re.search(r"/products/([a-z0-9\-]+)/?", url); return m.group(1) if m else None
@@ -593,9 +679,8 @@ def gsc_list():
     return jsonify({"ok": True, "count": len(out), "items": out, "params": {"ctr_max": max_ctr, "impr_min": min_impr, "limit": limit}})
 
 # ─────────────────────────────────────────────────────────────
-# NEW: 지정 핸들 리라이트 (기존 유지)
+# 지정 핸들 리라이트
 # ─────────────────────────────────────────────────────────────
-
 def _product_id_by_handle(handle: str):
     q="""query($h: String!){ productByHandle(handle: $h){ id handle title } }"""
     data=_admin_graphql(q, {"h":handle}); node=(data.get("data",{}) or {}).get("productByHandle")
@@ -623,11 +708,10 @@ def seo_rewrite_by_handles():
     return jsonify({"ok": True, "count": len(changed), "items": changed, "errors": errors, "dry_run": dry})
 
 # ─────────────────────────────────────────────────────────────
-# NEW: FAQ JSON 메타필드 & JSON-LD (기존 유지)
+# FAQ JSON 메타필드 & JSON-LD
 # ─────────────────────────────────────────────────────────────
 DEFAULT_FAQ=[{"question":"배송은 얼마나 걸리나요?","answer":"보통 2~5영업일 내 도착합니다."},
              {"question":"교환/반품이 가능한가요?","answer":"수령 후 14일 이내 가능합니다. 간단한 사유와 함께 문의 주세요."}]
-
 
 def _get_product_by_handle(handle: str):
     try:
@@ -640,7 +724,6 @@ def _get_product_by_handle(handle: str):
     except: pass
     return None
 
-
 def _get_faq_metafield(product_id: int):
     try:
         mres=_api_get(f"/products/{product_id}/metafields.json")
@@ -648,7 +731,6 @@ def _get_faq_metafield(product_id: int):
             if m.get("namespace")=="custom" and m.get("key")=="faq_json": return m
     except Exception as e: logging.warning("get_faq_metafield error for %s: %s", product_id, e)
     return None
-
 
 def _set_faq_metafield(product_id: int, faq_list):
     payload={"metafield":{"namespace":"custom","key":"faq_json","type":"json","value":json.dumps(faq_list,ensure_ascii=False)}}
@@ -695,7 +777,7 @@ def faq_jsonld():
     return Response(json.dumps(ld, ensure_ascii=False, separators=(",",":")), mimetype="application/ld+json")
 
 # ─────────────────────────────────────────────────────────────
-# TEST UI — (기존 유지, 구글 핑 문구 갱신)
+# TEST UI — Google ping 안내 갱신
 # ─────────────────────────────────────────────────────────────
 TEST_HTML = """
 <!doctype html><meta charset="utf-8"><title>SEO Test Playground</title>
@@ -715,7 +797,7 @@ input,button{padding:10px;border:1px solid #ddd;border-radius:10px}button{cursor
 <div class="card"><h3>SEO 리라이트 (실행)</h3><button onclick="go('/seo/rewrite?limit=5','POST',true)">POST /seo/rewrite?limit=5&auth=...</button><pre id="out5"></pre></div>
 <div class="card"><h3>FAQ 부트스트랩 (드라이런)</h3><button onclick="go('/seo/faq/bootstrap?limit=10&dry_run=true','GET',true)">GET /seo/faq/bootstrap?limit=10&dry_run=true&auth=...</button><pre id="out6"></pre></div>
 <div class="card"><h3>GSC CSV 업로드 & Low-CTR</h3>
-<input type="file" id="csvFile"><button onclick="uploadCSV()">POST /gsc/low-ctr/upload</button>
+<input type="file" id="csvFile"><button onclick="uploadCSV()">POST /gSC/low-ctr/upload</button>
 <button onclick="go('/gsc/low-ctr/list','GET',true)">GET /gsc/low-ctr/list?auth=...</button><pre id="out7"></pre></div>
 <div class="card"><h3>SEO Optimize(회전 10개)</h3><button onclick="go('/seo/optimize?limit=10&rotate=true','GET',true)">GET /seo/optimize?limit=10&rotate=true&auth=...</button><pre id="out8"></pre></div>
 <script>
@@ -735,7 +817,7 @@ def tests_page():
     return Response(TEST_HTML, mimetype="text/html")
 
 # ─────────────────────────────────────────────────────────────
-# ▼▼▼ NEW: 키워드맵 + 회전 최적화 + ALT 보완 + (선택) GraphQL 업데이트 ▼▼▼
+# ▼▼▼ 키워드맵 + 회전 최적화 + ALT 보완 + (선택) GraphQL 업데이트 ▼▼▼
 # ─────────────────────────────────────────────────────────────
 DEFAULT_KW_MAP = {
     "phone-cases": ["magsafe case slim","shockproof iphone 15 case","clear phone case anti-yellowing"],
@@ -772,7 +854,7 @@ def _pick_kw(product, kw_map):
     if any(x in title for x in ["pet","cat","dog"]): return kw_map.get("pets",["fast shipping"])[0]
     return kw_map.get("generic",["fast shipping"])[0]
 
-def _cut(s, n): 
+def _cut(s, n):
     if len(s)<=n: return s
     return s[:n-1].rstrip()+"…"
 
@@ -845,7 +927,7 @@ def keywords_run():
 
 @app.get("/seo/optimize")
 def seo_optimize_rotate():
-    """회전 처리 기반 직접 최적화 실행 (기존 /seo/run 별칭은 유지)"""
+    """회전 처리 기반 직접 최적화 실행"""
     if not _authorized(): return _unauth()
     limit=int(request.args.get("limit", SEO_LIMIT)); rotate=(request.args.get("rotate","true").lower()=="true")
     try:
@@ -867,6 +949,16 @@ def seo_optimize_rotate():
             except Exception as e:
                 rec={"action":"seo_update","ok":False,"product_id":pid,"error":str(e)[:300]}
                 _append_row(rec); results.append(rec)
+
+        # (옵션) SEO 적용 후 GSC sitemap 재제출
+        try:
+            if ENABLE_GSC_SITEMAP_SUBMIT:
+                feed_url = PRIMARY_SITEMAP or (f"https://{CANONICAL_DOMAIN}/sitemap.xml" if CANONICAL_DOMAIN else "")
+                if feed_url:
+                    _gsc_submit_sitemap(feed_url)
+        except Exception as e_auto:
+            logging.warning("auto gsc sitemap submit failed: %s", e_auto)
+
         return jsonify({"ok":True,"count":len(results),"results":results})
     except Exception as e:
         _append_row({"event":"seo_optimize","ok":False,"error":str(e)[:300]})
@@ -878,10 +970,3 @@ def seo_optimize_rotate():
 print("[BOOT] main.py loaded successfully")
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
-
-
-
-
-
-
