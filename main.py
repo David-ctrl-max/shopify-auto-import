@@ -459,6 +459,25 @@ def report_daily():
     return jsonify({"ok": True, "emailed": res, "subject": subject})
 
 # ─────────────────────────────────────────────────────────────
+# Misc convenience endpoints
+# ─────────────────────────────────────────────────────────────
+@app.get("/")
+def root():
+    return jsonify({"ok": True, "service": "seo-automation", "health": f"{request.host_url}health"})
+
+@app.get("/__routes")
+@require_auth
+def list_routes():
+    routes = []
+    for r in app.url_map.iter_rules():
+        routes.append({
+            "rule": str(r),
+            "endpoint": r.endpoint,
+            "methods": sorted(list(r.methods))
+        })
+    return jsonify({"count": len(routes), "routes": routes})
+
+# ─────────────────────────────────────────────────────────────
 # Entrypoint
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
