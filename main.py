@@ -1,29 +1,26 @@
 """
-main.py — Unified Pro (Product Registration + SEO Automation + Retry/Logs/Email) — 2025-09-26
+main.py — Unified Pro (Register + SEO + Sitemap + Email) — 2025-09-26 (FINAL)
 
-✅ What’s inside
-- Product:  POST/GET /register  → real Shopify product creation (images, options, variants, inventory)
-- SEO:      GET /seo/optimize    → rotate N products; set meta title/desc (CTA), suggest ALT fallback
-- Alias:    GET /run-seo         → alias to /seo/optimize (cron-safe)
-- Robots:   GET /robots.txt      → includes Sitemap: lines
-- Sitemap:  GET /sitemap-products.xml
-- GSC:      GET /gsc/sitemap/submit?auth=...&sitemap=... (optional; service account needed)
-- Ping:     GET /bing/ping?auth=...
-- Report:   GET /report/daily?auth=... → bilingual EN/KR email (SendGrid)
-- Inspect:  GET /health, GET /__routes?auth=..., GET /
+✅ What’s included
+- /register (GET/POST) : real Shopify product creation (images/options/variants/inventory)
+- /seo/optimize        : rotate N products; set SEO meta (title/desc) with CTA, suggest ALT
+- /run-seo             : alias to /seo/optimize (cron)
+- /sitemap-products.xml: product-only sitemap (canonical domain aware)
+- /robots.txt          : robots with Sitemap lines
+- /bing/ping           : Bing sitemap ping (Google ping deprecated)
+- /gsc/sitemap/submit  : optional Search Console sitemap submit (service account)
+- /report/daily        : EN/KR daily email summary (SendGrid)
+- /health, /__routes, / : diagnostics
 
 🔐 Auth
-- Use query `auth=<IMPORT_AUTH_TOKEN>` (or header `X-Auth: <token>`) for privileged endpoints.
+- Use query `auth=<IMPORT_AUTH_TOKEN>` (or header `X-Auth`) for privileged endpoints.
 - Default IMPORT_AUTH_TOKEN = "jeffshopsecure".
 
 🌎 Environment (Render)
-# Core
 IMPORT_AUTH_TOKEN=jeffshopsecure
 SHOPIFY_STORE=jeffsfavoritepicks
 SHOPIFY_API_VERSION=2025-07
 SHOPIFY_ADMIN_TOKEN=shpat_xxx
-
-# Options
 SEO_LIMIT=10
 USE_GRAPHQL=true
 ENABLE_BING_PING=true
@@ -42,8 +39,7 @@ EMAIL_FROM=reports@jeffsfavoritepicks.com
 # GSC (optional)
 ENABLE_GSC_SITEMAP_SUBMIT=false
 GSC_SITE_URL=https://jeffsfavoritepicks.com
-GOOGLE_SERVICE_JSON_B64=...
-GOOGLE_SERVICE_JSON_PATH=/app/sa.json
+GOOGLE_SERVICE_JSON_B64=...  (or) GOOGLE_SERVICE_JSON_PATH=/app/sa.json
 """
 
 import os, sys, json, time, base64, pathlib, logging
@@ -66,7 +62,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("seo-automation")
 
-# File log (best-effort)
+# Optional file log (best-effort)
 try:
     logs_dir = pathlib.Path("logs"); logs_dir.mkdir(exist_ok=True)
     fh = logging.FileHandler(logs_dir / "app.log")
@@ -201,7 +197,7 @@ def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_d
         "query": """
         mutation productUpdate($input: ProductInput!) {
           productUpdate(input: $input) {
-            product { id seo { title description } }
+            product { id title seo { title description } }
             userErrors { field message }
           }
         }
@@ -397,11 +393,9 @@ def seo_optimize():
         try:
             mt = build_meta_title(p)
             md = build_meta_desc(p)
-            # GraphQL preferred; REST fallback
             if USE_GRAPHQL:
                 res = shopify_update_seo_graphql(gid, mt, md)
                 if not res.get("ok", True):
-                    # fallback to REST on userErrors
                     res = shopify_update_seo_rest(pid, mt, md)
             else:
                 res = shopify_update_seo_rest(pid, mt, md)
