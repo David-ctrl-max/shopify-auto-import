@@ -1,5 +1,5 @@
 """
-main.py — Unified Pro (Register + SEO + Sitemap + Email) — 2025-09-26 (FINAL)
+main.py — Unified Pro (Register + SEO + Sitemap + Email + IndexNow) — 2025-09-26 (FINAL)
 
 ✅ What’s included
 - /register (GET/POST) : real Shopify product creation (images/options/variants/inventory)
@@ -7,7 +7,8 @@ main.py — Unified Pro (Register + SEO + Sitemap + Email) — 2025-09-26 (FINAL
 - /run-seo             : alias to /seo/optimize (cron)
 - /sitemap-products.xml: product-only sitemap (canonical domain aware)
 - /robots.txt          : robots with Sitemap lines
-- /bing/ping           : Bing sitemap ping (Google ping deprecated)
+- /bing/ping           : 410 Gone 안내 (Bing sitemap ping deprecated)
+- /indexnow/submit     : IndexNow 제출 (권장)
 - /gsc/sitemap/submit  : optional Search Console sitemap submit (service account)
 - /report/daily        : EN/KR daily email summary (SendGrid)
 - /health, /__routes, / : diagnostics
@@ -23,12 +24,16 @@ SHOPIFY_API_VERSION=2025-07
 SHOPIFY_ADMIN_TOKEN=shpat_xxx
 SEO_LIMIT=10
 USE_GRAPHQL=true
-ENABLE_BING_PING=true
+ENABLE_BING_PING=false
 PRIMARY_SITEMAP=https://jeffsfavoritepicks.com/sitemap.xml
 PUBLIC_BASE=https://shopify-auto-import.onrender.com
 CANONICAL_DOMAIN=jeffsfavoritepicks.com
 DRY_RUN=false
 LOG_LEVEL=INFO
+
+# IndexNow
+INDEXNOW_KEY=your-indexnow-key
+INDEXNOW_KEY_URL=https://jeffsfavoritepicks.com/indexnow-key.txt
 
 # Email (optional)
 ENABLE_EMAIL=true
@@ -42,8 +47,7 @@ GSC_SITE_URL=https://jeffsfavoritepicks.com
 GOOGLE_SERVICE_JSON_B64=...  (or) GOOGLE_SERVICE_JSON_PATH=/app/sa.json
 """
 
-import os, sys, json, time, base64, pathlib, logging
-import re
+import os, sys, json, time, base64, pathlib, logging, re
 from typing import Any, Dict, List, Optional
 import datetime as dt
 
@@ -74,12 +78,10 @@ except Exception as e:
 # ─────────────────────────────────────────────────────────────
 # Env / Config
 # ─────────────────────────────────────────────────────────────
-
 def env_bool(key: str, default=False):
     v = os.getenv(key)
     if v is None: return default
     return str(v).lower() in ("1","true","yes","on")
-
 
 def env_str(key: str, default=""):
     return os.getenv(key, default)
@@ -90,11 +92,15 @@ API_VERSION      = env_str("SHOPIFY_API_VERSION", "2025-07")
 ADMIN_TOKEN      = env_str("SHOPIFY_ADMIN_TOKEN", "").strip()
 SEO_LIMIT        = int(env_str("SEO_LIMIT", "10") or 10)
 USE_GRAPHQL      = env_bool("USE_GRAPHQL", True)
-ENABLE_BING_PING = env_bool("ENABLE_BING_PING", True)
+ENABLE_BING_PING = env_bool("ENABLE_BING_PING", False)  # default false
 PRIMARY_SITEMAP  = env_str("PRIMARY_SITEMAP", "https://jeffsfavoritepicks.com/sitemap.xml").strip()
 PUBLIC_BASE      = env_str("PUBLIC_BASE", "").rstrip("/")
 CANONICAL_DOMAIN = env_str("CANONICAL_DOMAIN", "").strip()
 DRY_RUN          = env_bool("DRY_RUN", False)
+
+# IndexNow
+INDEXNOW_KEY     = env_str("INDEXNOW_KEY", "")
+INDEXNOW_KEY_URL = env_str("INDEXNOW_KEY_URL", "")
 
 # Email
 ENABLE_EMAIL     = env_bool("ENABLE_EMAIL", False)
@@ -116,7 +122,6 @@ app = Flask(__name__)
 # ─────────────────────────────────────────────────────────────
 # Auth & HTTP helpers
 # ─────────────────────────────────────────────────────────────
-
 def require_auth(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -126,7 +131,6 @@ def require_auth(fn):
             return jsonify({"ok": False, "error": "unauthorized"}), 401
         return fn(*args, **kwargs)
     return wrapper
-
 
 def retry(max_attempts=3, base_delay=0.6, factor=2.0, allowed=(429, 500, 502, 503, 504)):
     def deco(fn):
@@ -164,10 +168,10 @@ def http(method: str, url: str, **kwargs) -> requests.Response:
 # ─────────────────────────────────────────────────────────────
 # Shopify Admin (REST + GraphQL)
 # ─────────────────────────────────────────────────────────────
-BASE_REST   = f"https://{SHOPIFY_STORE}.myshopify.com/admin/api/{API_VERSION}"
-BASE_GRAPHQL= f"https://{SHOPIFY_STORE}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
-HEADERS_REST= {"X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json"}
-HEADERS_GQL = {"X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json"}
+BASE_REST    = f"https://{SHOPIFY_STORE}.myshopify.com/admin/api/{API_VERSION}"
+BASE_GRAPHQL = f"https://{SHOPIFY_STORE}.myshopify.com/admin/api/{API_VERSION}/graphql.json"
+HEADERS_REST = {"X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json"}
+HEADERS_GQL  = {"X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "application/json"}
 
 @retry()
 def shopify_get_products(limit: int=SEO_LIMIT) -> List[Dict[str,Any]]:
@@ -189,7 +193,7 @@ def shopify_update_seo_rest(product_id: int, meta_title: Optional[str], meta_des
 
 @retry()
 def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_desc: Optional[str]):
-    # FIXED mutation: only $input: ProductInput!
+    # Correct mutation signature: only $input
     if DRY_RUN:
         log.info("[DRY_RUN] GQL SEO update %s: metaTitle=%s metaDescription=%s", resource_id, seo_title, seo_desc)
         return {"dry_run": True}
@@ -224,13 +228,11 @@ def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_d
 # ─────────────────────────────────────────────────────────────
 # Product Registration (REAL)
 # ─────────────────────────────────────────────────────────────
-
 def _slugify(title: str) -> str:
     slug = re.sub(r"[^a-z0-9\- ]", "", (title or "").lower()).strip()
     slug = re.sub(r"\s+", "-", slug)
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
     return slug or f"prod-{int(time.time())}"
-
 
 def _normalize_product_payload(p: dict) -> dict:
     title        = p.get("title") or "Untitled Product"
@@ -238,20 +240,16 @@ def _normalize_product_payload(p: dict) -> dict:
     vendor       = p.get("vendor") or "Jeff’s Favorite Picks"
     product_type = p.get("product_type") or "General"
     tags         = p.get("tags") or []
-    if isinstance(tags, list):
-        tags_str = ",".join([str(t) for t in tags])
-    else:
-        tags_str = str(tags)
+    if isinstance(tags, list): tags_str = ",".join([str(t) for t in tags])
+    else: tags_str = str(tags)
 
     handle = p.get("handle") or _slugify(title)[:80]
 
     images = p.get("images") or []
     images_norm = []
     for img in images:
-        if isinstance(img, dict) and img.get("src"):
-            images_norm.append({"src": img["src"]})
-        elif isinstance(img, str):
-            images_norm.append({"src": img})
+        if isinstance(img, dict) and img.get("src"): images_norm.append({"src": img["src"]})
+        elif isinstance(img, str): images_norm.append({"src": img})
 
     variants = p.get("variants") or []
     variants_norm = []
@@ -286,10 +284,8 @@ def _normalize_product_payload(p: dict) -> dict:
             "images": images_norm,
         }
     }
-    if options_norm:
-        payload["product"]["options"] = options_norm
-    if variants_norm:
-        payload["product"]["variants"] = variants_norm
+    if options_norm: payload["product"]["options"] = options_norm
+    if variants_norm: payload["product"]["variants"] = variants_norm
     return payload
 
 @retry()
@@ -384,7 +380,7 @@ def seo_optimize():
     if not ADMIN_TOKEN:
         return jsonify({"ok": False, "error": "missing SHOPIFY_ADMIN_TOKEN"}), 400
     limit = int(request.args.get("limit") or SEO_LIMIT)
-    rotate = (request.args.get("rotate", "true").lower() != "false")
+    rotate = (request.args.get("rotate", "true").lower() != "false")  # reserved
     changed, errors = [], []
     prods = shopify_get_products(limit=limit)
     for p in prods[:limit]:
@@ -420,7 +416,6 @@ def run_seo_alias():
 # ─────────────────────────────────────────────────────────────
 # Email (SendGrid)
 # ─────────────────────────────────────────────────────────────
-
 def send_email(subject: str, html: str, text: Optional[str]=None) -> Dict[str,Any]:
     if not ENABLE_EMAIL:
         log.info("Email disabled; subject=%s", subject)
@@ -481,7 +476,7 @@ def report_daily():
 
     html = f"""
     <div style='font-family:system-ui,Segoe UI,Arial,sans-serif'>
-      <h3>Daily SEO Auto‑Fix Report</h3>
+      <h3>Daily SEO Auto-Fix Report</h3>
       {en}
       <hr/>
       {kr}
@@ -493,7 +488,6 @@ def report_daily():
 # ─────────────────────────────────────────────────────────────
 # GSC Sitemap submit (optional)
 # ─────────────────────────────────────────────────────────────
-
 def gsc_submit_sitemap(sitemap_url: str) -> Dict[str,Any]:
     if not ENABLE_GSC_SITEMAP_SUBMIT:
         return {"ok": False, "reason": "disabled"}
@@ -527,9 +521,8 @@ def gsc_submit():
     return jsonify(res)
 
 # ─────────────────────────────────────────────────────────────
-# Robots, Sitemap, Ping
+# Robots, Sitemap, Ping / IndexNow
 # ─────────────────────────────────────────────────────────────
-
 def _as_lastmod(iso_str: str) -> str:
     if not iso_str:
         return dt.datetime.utcnow().replace(microsecond=0).isoformat()+"Z"
@@ -538,7 +531,6 @@ def _as_lastmod(iso_str: str) -> str:
         return iso_str.replace("+00:00", "Z")
     except:
         return dt.datetime.utcnow().replace(microsecond=0).isoformat()+"Z"
-
 
 def _canonical_product_url(handle: str) -> str:
     if CANONICAL_DOMAIN:
@@ -583,13 +575,44 @@ def robots():
 @app.get("/bing/ping")
 @require_auth
 def bing_ping():
-    if not ENABLE_BING_PING:
-        return jsonify({"ok": False, "reason": "bing ping disabled"})
-    try:
-        r = http("GET", "https://www.bing.com/ping", params={"siteMap": PRIMARY_SITEMAP or f"{PUBLIC_BASE}/sitemap-products.xml"})
-        return jsonify({"ok": 200 <= r.status_code < 400, "status": r.status_code})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    # Bing sitemap ping은 공식적으로 410 Gone (deprecated)
+    return jsonify({
+        "ok": False,
+        "reason": "bing sitemap ping deprecated (HTTP 410)",
+        "action": "use /indexnow/submit instead"
+    }), 410
+
+@app.post("/indexnow/submit")
+@require_auth
+def indexnow_submit():
+    """
+    Body(JSON):
+    {
+      "urls": ["https://jeffsfavoritepicks.com/products/...", "..."],  # 선택
+      "use_sitemap": true                                             # 선택: sitemap도 함께 제출(대량 제출엔 권장 X)
+    }
+    """
+    key = INDEXNOW_KEY
+    key_url = INDEXNOW_KEY_URL
+    if not key or not key_url:
+        return jsonify({"ok": False, "error": "missing INDEXNOW_KEY / INDEXNOW_KEY_URL"}), 400
+
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls") or []
+    if data.get("use_sitemap") and PRIMARY_SITEMAP:
+        urls.append(PRIMARY_SITEMAP)
+    if not urls:
+        return jsonify({"ok": False, "error": "no urls"}), 400
+
+    payload = {
+        "host": CANONICAL_DOMAIN or f"{SHOPIFY_STORE}.myshopify.com",
+        "key": key,
+        "keyLocation": key_url,
+        "urlList": urls
+    }
+    r = http("POST", "https://api.indexnow.org/indexnow",
+             json=payload, headers={"Content-Type": "application/json"})
+    return jsonify({"ok": 200 <= r.status_code < 300, "status": r.status_code, "response": r.text[:500]})
 
 # ─────────────────────────────────────────────────────────────
 # Misc convenience endpoints
@@ -634,6 +657,3 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     log.info("Starting server on :%s", port)
     app.run(host="0.0.0.0", port=port)
-
-
-
