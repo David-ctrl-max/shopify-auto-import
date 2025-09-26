@@ -1,7 +1,8 @@
-# main.py — Unified Pro (Register + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow) — 2025-09-26
+# main.py — Unified Pro (Register + Auto Body HTML + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow)
 # ------------------------------------------------------------------------------------------------------------
 # ✅ What’s included
 # - /register (GET/POST)          : real Shopify product creation (images/options/variants/inventory)
+#   ↳ NEW: body_html 자동 생성(텍스트 중심), 이미지 ALT 자동, 옵션/태그 Title Case 정규화
 # - /seo/optimize                 : rotate N products; keyword-weighted SEO meta (title/desc) with CTA, ALT suggest
 # - /run-seo                      : alias to /seo/optimize (cron)
 # - /seo/keywords/run             : build keyword map (unigram/bigram), optional CSV save
@@ -45,18 +46,28 @@
 # GSC_SITE_URL=https://jeffsfavoritepicks.com
 # GOOGLE_SERVICE_JSON_B64=...   (or)  GOOGLE_SERVICE_JSON_PATH=/app/sa.json
 #
-# # Keyword Map (NEW)
+# # Keyword Map
 # KEYWORD_MIN_LEN=3
 # KEYWORD_LIMIT=100
 # KEYWORD_INCLUDE_BIGRAMS=true
 # KEYWORD_SAVE_CSV=false
 # KEYWORD_CACHE_TTL_MIN=60
 #
-# # Keyword Weighting for /seo/optimize (NEW)
+# # Keyword Weighting for /seo/optimize
 # KW_TOP_N_FOR_WEIGHT=30
 # TITLE_MAX_LEN=60
 # DESC_MAX_LEN=160
 # CTA_PHRASE="Grab Yours"
+#
+# # NEW: Auto body_html generator (text-only, SEO focused)
+# BODY_MIN_CHARS=120                 # 본문이 이 길이보다 짧으면 자동 생성
+# BODY_FORCE_OVERWRITE=false         # true면 기존 짧지 않아도 강제로 재작성
+# BODY_INCLUDE_GALLERY=true          # 본문 아래에 간단한 이미지 갤러리(텍스트 대비 표시)
+# NORMALIZE_TITLECASE=true           # 옵션/태그 Title Case 정규화
+# ALT_AUTO_GENERATE=true             # ALT 비어있을 때 자동 생성
+# BRAND_NAME="Jeff’s Favorite Picks" # 본문에 노출될 브랜드명
+# BENEFIT_LINE_EN="Fast Shipping · Quality Picks"
+# BENEFIT_LINE_KR="빠른 배송 · 엄선된 픽"
 # ------------------------------------------------------------------------------------------------------------
 
 import os, sys, json, time, base64, pathlib, logging, re
@@ -131,18 +142,28 @@ GSC_SITE_URL              = env_str("GSC_SITE_URL", "https://jeffsfavoritepicks.
 GOOGLE_SERVICE_JSON_B64   = env_str("GOOGLE_SERVICE_JSON_B64")
 GOOGLE_SERVICE_JSON_PATH  = env_str("GOOGLE_SERVICE_JSON_PATH")
 
-# Keyword map (NEW)
+# Keyword map
 KEYWORD_MIN_LEN         = env_int("KEYWORD_MIN_LEN", 3)
 KEYWORD_LIMIT_DEFAULT   = env_int("KEYWORD_LIMIT", 100)
 KEYWORD_INCLUDE_BIGRAMS = env_bool("KEYWORD_INCLUDE_BIGRAMS", True)
 KEYWORD_SAVE_CSV        = env_bool("KEYWORD_SAVE_CSV", False)
 KEYWORD_CACHE_TTL_MIN   = env_int("KEYWORD_CACHE_TTL_MIN", 60)
 
-# Weighting for optimize (NEW)
+# Weighting for optimize
 KW_TOP_N_FOR_WEIGHT = env_int("KW_TOP_N_FOR_WEIGHT", 30)
 TITLE_MAX_LEN       = env_int("TITLE_MAX_LEN", 60)
 DESC_MAX_LEN        = env_int("DESC_MAX_LEN", 160)
 CTA_PHRASE          = env_str("CTA_PHRASE", "Grab Yours")
+
+# Auto body generator
+BODY_MIN_CHARS         = env_int("BODY_MIN_CHARS", 120)
+BODY_FORCE_OVERWRITE   = env_bool("BODY_FORCE_OVERWRITE", False)
+BODY_INCLUDE_GALLERY   = env_bool("BODY_INCLUDE_GALLERY", True)
+NORMALIZE_TITLECASE    = env_bool("NORMALIZE_TITLECASE", True)
+ALT_AUTO_GENERATE      = env_bool("ALT_AUTO_GENERATE", True)
+BRAND_NAME             = env_str("BRAND_NAME", "Jeff’s Favorite Picks")
+BENEFIT_LINE_EN        = env_str("BENEFIT_LINE_EN", "Fast Shipping · Quality Picks")
+BENEFIT_LINE_KR        = env_str("BENEFIT_LINE_KR", "빠른 배송 · 엄선된 픽")
 
 # ─────────────────────────────────────────────────────────────
 # Flask app
@@ -255,17 +276,201 @@ def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_d
     r = http("POST", BASE_GRAPHQL, headers=HEADERS_GQL, json=mutation)
     data = r.json()
     pu = data.get("data", {}).get("productUpdate")
-    if not pu:
-        log.error("GraphQL productUpdate no data: %s", data)
-        return {"ok": False, "error": "no productUpdate data", "raw": data}
-    errs = pu.get("userErrors") or []
-    if errs:
-        log.error("GraphQL productUpdate userErrors: %s", errs)
-        return {"ok": False, "errors": errs, "raw": data}
+    errs = (pu or {}).get("userErrors") or []
+    if not pu or errs:
+        log.error("GraphQL productUpdate issue: %s", errs or data)
+        return {"ok": False, "errors": errs or ["no productUpdate data"], "raw": data}
     return {"ok": True, "data": pu}
 
 def product_gid(pid: int) -> str:
     return f"gid://shopify/Product/{pid}"
+
+# ─────────────────────────────────────────────────────────────
+# Utils for body_html generation
+# ─────────────────────────────────────────────────────────────
+STOPWORDS = {
+    "the","and","for","you","your","with","from","this","that","are","our","has","have","was","were","will","can","all",
+    "any","into","more","most","such","other","than","then","them","they","their","there","over","after","before",
+    "not","but","about","also","how","what","when","where","which","while","who","whom","why","a","an","in","on","of",
+    "to","by","as","at","is","it","be","or","we","i","me","my","mine","yours","its","it’s","it's",
+    # product generics
+    "new","pcs","pc","set","size","color","colors","style","styles","type","types","model","models","brand",
+    "phone","smartphone","case","cases","accessory","accessories","pet","pets","device","devices",
+    "for-iphone","iphone","samsung","xiaomi","android","apple","pro","max","ultra","series","gen",
+    "magnetic","magsafe","wireless","charger","charging","usb","type-c","cable","cables","adapter","adapters",
+    "band","bands","watch","watches","airpods","earbuds",
+}
+
+def strip_html(text: str) -> str:
+    text = (text or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def title_case(s: str) -> str:
+    if not s: return s
+    words = re.split(r"(\s+|-|/)", str(s))
+    def tc(w: str) -> str:
+        if not w or re.fullmatch(r"\W+", w): return w
+        if w.lower() in {"for","and","or","to","of","a","an","the","in","on","at","by"}:
+            return w.lower()
+        return w[0].upper() + w[1:].lower()
+    return "".join(tc(w) for w in words)
+
+def ensure_titlecase_in_product(p: dict):
+    if not NORMALIZE_TITLECASE: return p
+    # options
+    opts = p.get("options") or []
+    for opt in opts:
+        if isinstance(opt, dict):
+            if opt.get("name"): opt["name"] = title_case(opt["name"])
+            if isinstance(opt.get("values"), list):
+                opt["values"] = [title_case(v) for v in opt["values"]]
+    # tags
+    tags = p.get("tags")
+    if isinstance(tags, list):
+        p["tags"] = [title_case(t) for t in tags]
+    elif isinstance(tags, str):
+        p["tags"] = ",".join([title_case(x.strip()) for x in tags.split(",") if x.strip()])
+    return p
+
+def auto_alt_list(p: dict) -> List[str]:
+    """Generate ALT suggestions for every image without alt."""
+    outs = []
+    imgs = p.get("images") or []
+    title = p.get("title") or "Product"
+    for i, img in enumerate(imgs):
+        alt = ""
+        if isinstance(img, dict): alt = (img.get("alt") or "").strip()
+        if not alt:
+            outs.append(f"{title} — image {i+1}")
+    return outs
+
+def inject_auto_alt_to_images(p: dict):
+    if not ALT_AUTO_GENERATE: return p
+    title = p.get("title") or "Product"
+    imgs = p.get("images") or []
+    new = []
+    for i, img in enumerate(imgs):
+        if isinstance(img, str):
+            new.append({"src": img, "alt": f"{title} — image {i+1}"})
+        elif isinstance(img, dict):
+            if not (img.get("alt") or "").strip():
+                img["alt"] = f"{title} — image {i+1}"
+            new.append(img)
+    p["images"] = new
+    return p
+
+def tokenize(text: str, min_len: int) -> List[str]:
+    t = text.lower()
+    t = re.sub(r"[_/|]", " ", t)
+    return re.findall(r"[a-z0-9\+\-]{%d,}" % max(1, min_len), t)
+
+def filter_stopwords(tokens: List[str], min_len: int) -> List[str]:
+    out = []
+    for w in tokens:
+        if len(w) < min_len: continue
+        if w in STOPWORDS: continue
+        if re.fullmatch(r"\d[\d\-]*", w): continue
+        out.append(w)
+    return out
+
+def bigrams(tokens: List[str]) -> List[str]:
+    return [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens)-1)]
+
+def best_keywords_from_product(p: dict, top_n: int = 8) -> List[str]:
+    """Take keywords from title + body + tags + options to reuse in body_html."""
+    parts: List[str] = []
+    parts.append(p.get("title") or "")
+    parts.append(strip_html(p.get("body_html") or ""))
+    # tags
+    tags = p.get("tags")
+    if isinstance(tags, list): parts.extend(tags)
+    elif isinstance(tags, str): parts.extend([x.strip() for x in tags.split(",") if x.strip()])
+    # options / variants
+    for opt in (p.get("options") or []):
+        if isinstance(opt, dict):
+            if opt.get("name"): parts.append(opt["name"])
+            for v in (opt.get("values") or []): parts.append(v)
+    for v in (p.get("variants") or []):
+        if isinstance(v, dict):
+            if v.get("title"): parts.append(v["title"])
+            if v.get("sku"):   parts.append(str(v["sku"]))
+    tokens = filter_stopwords(tokenize(" ".join(parts), KEYWORD_MIN_LEN), KEYWORD_MIN_LEN)
+    uni = Counter(tokens)
+    key_list = [k for k,_ in uni.most_common(top_n)]
+    return key_list
+
+def make_feature_list_from_keywords(kws: List[str]) -> List[str]:
+    # Heuristic: convert tokens to readable feature bullets
+    feats = []
+    for kw in kws:
+        t = kw.replace("-", " ").title()
+        feats.append(t)
+    # Add generic e-com value props if not present
+    base = ["Lightweight", "Durable Materials", "Easy to Use", "Fits Most Devices", "Gift-Ready Packaging"]
+    for b in base:
+        if len(feats) >= 8: break
+        if b.lower() not in " ".join(feats).lower():
+            feats.append(b)
+    return feats[:8]
+
+def build_text_body_html(p: dict) -> str:
+    """SEO optimized, text-first body_html; gallery is rendered separately (optional)."""
+    title = p.get("title") or "Product"
+    vendor = p.get("vendor") or BRAND_NAME
+    benefit_en = BENEFIT_LINE_EN
+    benefit_kr = BENEFIT_LINE_KR
+
+    # Extract keywords & bullets
+    kws = best_keywords_from_product(p, top_n=10)
+    bullets = make_feature_list_from_keywords(kws)
+
+    # Try to infer spec hints from variants/options
+    specs: List[Tuple[str,str]] = []
+    for opt in (p.get("options") or []):
+        if isinstance(opt, dict) and opt.get("name") and opt.get("values"):
+            name = title_case(opt["name"]) if NORMALIZE_TITLECASE else opt["name"]
+            specs.append((name, ", ".join([title_case(v) if NORMALIZE_TITLECASE else v for v in opt["values"]])))
+
+    # Compose text-only HTML (no big banners; headings + bullets + small notes)
+    # Keep it compact, semantic, and index-friendly.
+    body = []
+    body.append(f"<div class='pdp-copy' style='line-height:1.6'>")
+    body.append(f"  <h2 style='margin:0 0 .5rem 0'>{title}</h2>")
+    body.append(f"  <p><strong>{vendor}</strong> — {benefit_en} / {benefit_kr}</p>")
+
+    if bullets:
+        body.append("  <h3>Key Features</h3>")
+        body.append("  <ul>")
+        for b in bullets:
+            body.append(f"    <li>{b}</li>")
+        body.append("  </ul>")
+
+    if specs:
+        body.append("  <h3>Specs</h3>")
+        body.append("  <table role='table' style='border-collapse:collapse;width:100%'>")
+        for k,v in specs:
+            body.append("    <tr>")
+            body.append(f"      <th style='text-align:left;border-bottom:1px solid #eee;padding:.25rem .5rem'>{k}</th>")
+            body.append(f"      <td style='border-bottom:1px solid #eee;padding:.25rem .5rem'>{v}</td>")
+            body.append("    </tr>")
+        body.append("  </table>")
+
+    body.append("  <p style='margin-top:.75rem'>Carefully selected for everyday use. Enjoy dependable quality and friendly support.</p>")
+    body.append(f"  <p><em>Tip:</em> Add to cart now — limited stock! <strong>{CTA_PHRASE}</strong>.</p>")
+
+    # (Optional) miniature gallery note; actual images are separate in Shopify but we avoid heavy HTML here
+    if BODY_INCLUDE_GALLERY and (p.get('images') or []):
+        body.append("  <p style='opacity:.85;font-size:.95em'>See product images above for color and style references.</p>")
+
+    body.append("</div>")
+    return "\n".join(body)
+
+def should_generate_body(existing: Optional[str]) -> bool:
+    if BODY_FORCE_OVERWRITE: 
+        return True
+    clean = strip_html(existing or "")
+    return len(clean) < BODY_MIN_CHARS
 
 # ─────────────────────────────────────────────────────────────
 # Product Registration (REAL)
@@ -277,9 +482,25 @@ def _slugify(title: str) -> str:
     return slug or f"prod-{int(time.time())}"
 
 def _normalize_product_payload(p: dict) -> dict:
+    # TitleCase / ALT / body_html generation
+    p = ensure_titlecase_in_product(p)
+    p = inject_auto_alt_to_images(p)
+
     title        = p.get("title") or "Untitled Product"
-    body_html    = p.get("body_html") or p.get("body") or ""
-    vendor       = p.get("vendor") or "Jeff’s Favorite Picks"
+    body_html_in = p.get("body_html") or p.get("body") or ""
+    if should_generate_body(body_html_in):
+        try:
+            body_html_in = build_text_body_html({"title": title,
+                                                 "vendor": p.get("vendor") or BRAND_NAME,
+                                                 "options": p.get("options") or [],
+                                                 "variants": p.get("variants") or [],
+                                                 "images": p.get("images") or [],
+                                                 "tags": p.get("tags")})
+        except Exception as e:
+            log.warning("Auto body_html build failed, fallback to minimal: %s", e)
+            body_html_in = f"<p>{title} — {BENEFIT_LINE_EN} / {BENEFIT_LINE_KR}. {CTA_PHRASE}.</p>"
+
+    vendor       = p.get("vendor") or BRAND_NAME
     product_type = p.get("product_type") or "General"
     tags         = p.get("tags") or []
     if isinstance(tags, list): tags_str = ",".join([str(t) for t in tags])
@@ -290,8 +511,10 @@ def _normalize_product_payload(p: dict) -> dict:
     images = p.get("images") or []
     images_norm = []
     for img in images:
-        if isinstance(img, dict) and img.get("src"): images_norm.append({"src": img["src"]})
-        elif isinstance(img, str): images_norm.append({"src": img})
+        if isinstance(img, dict) and img.get("src"):
+            images_norm.append({"src": img["src"], **({"alt": img["alt"]} if img.get("alt") else {})})
+        elif isinstance(img, str):
+            images_norm.append({"src": img})
 
     variants = p.get("variants") or []
     variants_norm = []
@@ -318,7 +541,7 @@ def _normalize_product_payload(p: dict) -> dict:
     payload = {
         "product": {
             "title": title,
-            "body_html": body_html,
+            "body_html": body_html_in,
             "vendor": vendor,
             "product_type": product_type,
             "tags": tags_str,
@@ -366,10 +589,10 @@ def register():
         # GET → demo create
         demo = {
             "title": "MagSafe Clear Case - iPhone 15",
-            "body_html": "<p>Crystal clear anti-yellowing, MagSafe ready.</p>",
-            "vendor": "Jeff’s Favorite Picks",
+            "body_html": "",  # intentionally blank → will be auto-generated
+            "vendor": BRAND_NAME,
             "product_type": "Phone Case",
-            "tags": ["magsafe","iphone","clear"],
+            "tags": ["MagSafe","iPhone","Clear"],
             "images": [{"src": "https://picsum.photos/seed/magsafe15/800/800"}],
             "variants": [{"sku": f"MAGSAFE-15-CLR-{int(time.time())}", "price": "19.99", "inventory_quantity": 25, "option1": "Clear"}],
             "options": [{"name": "Color", "values": ["Clear"]}],
@@ -380,43 +603,8 @@ def register():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# Keyword Map (NEW): tokenize, build, cache
+# Keyword Map (cached)
 # ─────────────────────────────────────────────────────────────
-STOPWORDS = {
-    "the","and","for","you","your","with","from","this","that","are","our","has","have","was","were","will","can","all",
-    "any","into","more","most","such","other","than","then","them","they","their","there","over","after","before",
-    "not","but","about","also","how","what","when","where","which","while","who","whom","why","a","an","in","on","of",
-    "to","by","as","at","is","it","be","or","we","i","me","my","mine","yours","its","it’s","it's",
-    # product generics
-    "new","pcs","pc","set","size","color","colors","style","styles","type","types","model","models","brand",
-    "phone","smartphone","case","cases","accessory","accessories","pet","pets","device","devices",
-    "for-iphone","iphone","samsung","xiaomi","android","apple","pro","max","ultra","series","gen",
-    "magnetic","magsafe","wireless","charger","charging","usb","type-c","cable","cables","adapter","adapters",
-    "band","bands","watch","watches","airpods","earbuds",
-}
-
-def strip_html(text: str) -> str:
-    text = (text or "")
-    text = re.sub(r"<[^>]+>", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-def tokenize(text: str, min_len: int) -> List[str]:
-    t = text.lower()
-    t = re.sub(r"[_/|]", " ", t)
-    return re.findall(r"[a-z0-9\+\-]{%d,}" % max(1, min_len), t)
-
-def filter_stopwords(tokens: List[str], min_len: int) -> List[str]:
-    out = []
-    for w in tokens:
-        if len(w) < min_len: continue
-        if w in STOPWORDS: continue
-        if re.fullmatch(r"\d[\d\-]*", w): continue
-        out.append(w)
-    return out
-
-def bigrams(tokens: List[str]) -> List[str]:
-    return [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens)-1)]
-
 _kw_cache = {"built_at": None, "params": None, "unigrams": [], "bigrams": [], "scanned": 0}
 
 def _cache_valid(ttl_min: int) -> bool:
@@ -443,7 +631,6 @@ def _build_keyword_map(limit: int, min_len: int, include_bigrams: bool, scope: s
             tags = p.get("tags") or []
             if isinstance(tags, list): parts.extend(tags)
             elif isinstance(tags, str): parts.extend([x.strip() for x in tags.split(",") if x.strip()])
-        # images alt (REST has 'alt' on image)
         if scope in ("all",):
             for img in (p.get("images") or []):
                 alt = (img.get("alt") or "").strip()
@@ -474,7 +661,7 @@ def _get_keyword_map(limit: int, min_len: int, include_bigrams: bool, scope: str
     _kw_cache["scanned"]  = data["scanned"]
     return {**data, "cached": False, "age_sec": 0, "params": _kw_cache["params"]}
 
-# ── Keyword endpoints
+# Endpoints
 @app.get("/seo/keywords/run")
 @require_auth
 def seo_keywords_run():
@@ -539,7 +726,6 @@ def _score_kw(kw: str, title: str, body: str, tags: List[str], boost_set: set) -
 
 def _compose_title(primary: str, benefit: str, cta: str) -> str:
     title = f"{primary} | {benefit}"
-    # try to append CTA if fits
     if len(title) + 3 + len(cta) <= TITLE_MAX_LEN:
         title = f"{title} – {cta}"
     return (title[:TITLE_MAX_LEN]).rstrip(" -|·,")
@@ -578,7 +764,6 @@ def seo_optimize():
     force_kw     = str(request.args.get("force_keywords","false")).lower() in ("1","true","yes","on","y")
     kw_top_n     = int(request.args.get("kw_top_n", KW_TOP_N_FOR_WEIGHT) or KW_TOP_N_FOR_WEIGHT)
 
-    # 1) keyword map (cached)
     km = _get_keyword_map(limit=max(kw_top_n, KEYWORD_LIMIT_DEFAULT),
                           min_len=KEYWORD_MIN_LEN,
                           include_bigrams=KEYWORD_INCLUDE_BIGRAMS,
@@ -588,8 +773,7 @@ def seo_optimize():
     top_bigrams  = [k for k,_ in (km["bigrams"] or [])[:kw_top_n]]
     boost_set    = set(top_unigrams + top_bigrams)
 
-    # 2) fetch products to update
-    prods = shopify_get_products(limit=max(limit, 50))  # buffer
+    prods = shopify_get_products(limit=max(limit, 50))
     targets = prods[:limit] if not rotate else prods[:limit]
 
     changed, errors = [], []
@@ -604,7 +788,6 @@ def seo_optimize():
             tags_list = p.get("tags") if isinstance(p.get("tags"), list) else \
                         ([x.strip() for x in (p.get("tags") or "").split(",")] if isinstance(p.get("tags"), str) else [])
 
-            # 3) rank keywords for this product
             scored_bi  = sorted([(kw, _score_kw(kw, title_raw, body_raw, tags_list, boost_set)) for kw in top_bigrams], key=lambda x: x[1], reverse=True)
             scored_uni = sorted([(kw, _score_kw(kw, title_raw, body_raw, tags_list, boost_set)) for kw in top_unigrams], key=lambda x: x[1], reverse=True)
 
@@ -624,7 +807,6 @@ def seo_optimize():
             meta_title = _compose_title(primary=primary, benefit=benefit, cta=CTA_PHRASE)
             meta_desc  = _compose_desc(keywords=chosen, base_body=strip_html(p.get("body_html") or ""), cta=CTA_PHRASE)
 
-            # Skip if existing SEO is already decent (unless force=1)
             existing_title = p.get("metafields_global_title_tag")
             existing_desc  = p.get("metafields_global_description_tag")
             def ok_len(s, mx): return s and (15 <= len(s.strip()) <= mx)
@@ -632,7 +814,6 @@ def seo_optimize():
                 changed.append({"id": pid, "handle": p.get("handle"), "skipped_reason": "existing_seo_ok"})
                 continue
 
-            # 4) Update via GraphQL or REST
             if USE_GRAPHQL:
                 res = shopify_update_seo_graphql(gid, meta_title, meta_desc)
                 if not res.get("ok", True):
@@ -835,7 +1016,6 @@ def robots():
 @app.get("/bing/ping")
 @require_auth
 def bing_ping():
-    # Bing sitemap ping은 공식적으로 410 Gone (deprecated)
     return jsonify({
         "ok": False,
         "reason": "bing sitemap ping deprecated (HTTP 410)",
@@ -917,4 +1097,5 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     log.info("Starting server on :%s", port)
     app.run(host="0.0.0.0", port=port)
+
 
