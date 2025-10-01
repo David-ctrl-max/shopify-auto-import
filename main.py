@@ -282,15 +282,21 @@ def shopify_update_seo_rest(product_id: int, meta_title: Optional[str], meta_des
 
 @retry()
 def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_desc: Optional[str], body_html: Optional[str]=None):
+    """
+    ✅ Shopify 최신 스키마 반영:
+       - 본문 필드: descriptionHtml
+       - 반환 필드: product { id title descriptionHtml seo { title description } }
+    """
     if DRY_RUN:
-        log.info("[DRY_RUN] GQL SEO update %s: metaTitle=%s metaDescription=%s body?%s", resource_id, seo_title, seo_desc, bool(body_html))
+        log.info("[DRY_RUN] GQL SEO update %s: metaTitle=%s metaDescription=%s body?%s",
+                 resource_id, seo_title, seo_desc, bool(body_html))
         return {"dry_run": True}
-    # GraphQL productUpdate allows bodyHtml + seo
+
     mutation = {
         "query": """
         mutation productUpdate($input: ProductInput!) {
           productUpdate(input: $input) {
-            product { id title handle seo { title description } }
+            product { id title descriptionHtml seo { title description } }
             userErrors { field message }
           }
         }
@@ -299,7 +305,7 @@ def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_d
             "input": {
                 "id": resource_id,
                 **({"seo": {"title": seo_title, "description": seo_desc}} if (seo_title or seo_desc) else {}),
-                **({"bodyHtml": body_html} if body_html is not None else {})
+                **({"descriptionHtml": body_html} if body_html is not None else {})
             }
         }
     }
@@ -475,7 +481,7 @@ def build_text_body_html(p: dict) -> str:
     return "\n".join(body)
 
 def should_generate_body(existing: Optional[str]) -> bool:
-    if BODY_FORCE_OVERWRITE: 
+    if BODY_FORCE_OVERWRITE:
         return True
     clean = strip_html(existing or "")
     return len(clean) < BODY_MIN_CHARS
@@ -879,6 +885,7 @@ def seo_optimize():
                 changed.append({"id": pid, "handle": p.get("handle"), "skipped_reason": "existing_seo_ok"})
                 continue
 
+            # 👉 GQL 우선: descriptionHtml 로 본문 갱신 (필요 시 REST로 폴백)
             if USE_GRAPHQL:
                 res = shopify_update_seo_graphql(gid, meta_title, meta_desc, body_html=new_body)
                 if not res.get("ok", True):
@@ -1261,5 +1268,6 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     log.info("Starting server on :%s", port)
     app.run(host="0.0.0.0", port=port)
+
 
 
