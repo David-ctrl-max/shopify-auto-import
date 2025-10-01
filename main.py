@@ -1,25 +1,28 @@
-# main.py — Unified Pro (Register + Auto Body HTML + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow)
-# ------------------------------------------------------------------------------------------------------------
+# main.py — Unified Pro (Register + Auto Body HTML + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow + Blog Auto-Post)
+# =========================================================================================================
 # ✅ What’s included
 # - /register (GET/POST)          : real Shopify product creation (images/options/variants/inventory)
-#   ↳ NEW: body_html 자동 생성(텍스트 중심), 이미지 ALT 자동, 옵션/태그 Title Case 정규화
-# - /seo/optimize                 : rotate N products; keyword-weighted SEO meta (title/desc) with CTA, ALT suggest
+#   ↳ Auto body_html(text-first), ALT auto, TitleCase normalize
+# - /seo/optimize                 : rotate N products; keyword-weighted SEO meta (title/desc) with CTA
+#   ↳ NEW: Long-tail bias, optional Related Picks internal links injection (safe, idempotent)
 # - /run-seo                      : alias to /seo/optimize (cron)
 # - /seo/keywords/run             : build keyword map (unigram/bigram), optional CSV save
-# - /seo/keywords/cache           : keyword cache status (age/params/counts)
+# - /seo/keywords/cache           : keyword cache status
+# - /blog/auto-post               : NEW review/compare style blog generator + Shopify Article create
 # - /sitemap-products.xml         : product-only sitemap (canonical domain aware)
 # - /robots.txt                   : robots with Sitemap lines
 # - /bing/ping                    : 410 Gone 안내 (Bing sitemap ping deprecated)
-# - /indexnow/submit             : IndexNow 제출 (권장)
-# - /gsc/sitemap/submit          : optional Search Console sitemap submit (service account)
-# - /report/daily                : EN/KR daily email summary (SendGrid)
-# - /health, /__routes, /        : diagnostics
+# - /indexnow/submit              : IndexNow 제출
+# - /gsc/sitemap/submit           : optional Search Console sitemap submit
+# - /report/daily                 : EN/KR daily email summary (SendGrid)
+# - /health, /__routes, /         : diagnostics
 #
-# 🔐 Auth:  use ?auth=<IMPORT_AUTH_TOKEN>  (or header X-Auth)
-# ------------------------------------------------------------------------------------------------------------
+# 🔐 Auth: use ?auth=<IMPORT_AUTH_TOKEN>  (or header X-Auth)
+# =========================================================================================================
 # 🌎 Environment (Render)
+# (기존 동일 + 아래 NEW 항목 확인)
 # IMPORT_AUTH_TOKEN=jeffshopsecure
-# SHOPIFY_STORE=jeffsfavoritepicks                # without .myshopify.com (we add it)
+# SHOPIFY_STORE=jeffsfavoritepicks
 # SHOPIFY_API_VERSION=2025-07
 # SHOPIFY_ADMIN_TOKEN=shpat_xxx
 # SEO_LIMIT=10
@@ -44,7 +47,8 @@
 # # GSC (optional)
 # ENABLE_GSC_SITEMAP_SUBMIT=false
 # GSC_SITE_URL=https://jeffsfavoritepicks.com
-# GOOGLE_SERVICE_JSON_B64=...   (or)  GOOGLE_SERVICE_JSON_PATH=/app/sa.json
+# GOOGLE_SERVICE_JSON_B64=...
+# GOOGLE_SERVICE_JSON_PATH=/app/sa.json
 #
 # # Keyword Map
 # KEYWORD_MIN_LEN=3
@@ -59,18 +63,29 @@
 # DESC_MAX_LEN=160
 # CTA_PHRASE="Grab Yours"
 #
-# # NEW: Auto body_html generator (text-only, SEO focused)
-# BODY_MIN_CHARS=120                 # 본문이 이 길이보다 짧으면 자동 생성
-# BODY_FORCE_OVERWRITE=false         # true면 기존 짧지 않아도 강제로 재작성
-# BODY_INCLUDE_GALLERY=true          # 본문 아래에 간단한 이미지 갤러리(텍스트 대비 표시)
-# NORMALIZE_TITLECASE=true           # 옵션/태그 Title Case 정규화
-# ALT_AUTO_GENERATE=true             # ALT 비어있을 때 자동 생성
-# BRAND_NAME="Jeff’s Favorite Picks" # 본문에 노출될 브랜드명
+# # Auto body generator
+# BODY_MIN_CHARS=120
+# BODY_FORCE_OVERWRITE=false
+# BODY_INCLUDE_GALLERY=true
+# NORMALIZE_TITLECASE=true
+# ALT_AUTO_GENERATE=true
+# BRAND_NAME="Jeff’s Favorite Picks"
 # BENEFIT_LINE_EN="Fast Shipping · Quality Picks"
 # BENEFIT_LINE_KR="빠른 배송 · 엄선된 픽"
-# ------------------------------------------------------------------------------------------------------------
+#
+# # NEW — Internal links injection
+# ALLOW_BODY_LINK_INJECTION=true          # /seo/optimize 중 Related Picks 자동 삽입 허용
+# RELATED_LINKS_MAX=3                      # 본문 하단에 최대 몇 개 링크 삽입
+# RELATED_SECTION_MARKER="<!--related-picks-->"  # 중복 삽입 방지 마커
+#
+# # NEW — Blog auto post
+# BLOG_AUTO_POST=true
+# BLOG_HANDLE=news                        # Shopify 블로그 handle (Online Store > Blog posts)
+# BLOG_DEFAULT_TOPIC="Phone Accessories"  # 기본 토픽
+# BLOG_POST_TYPE=review                   # review|compare (기본 템플릿 선택)
+# =========================================================================================================
 
-import os, sys, json, time, base64, pathlib, logging, re
+import os, sys, json, time, base64, pathlib, logging, re, random
 from typing import Any, Dict, List, Optional, Tuple
 import datetime as dt
 from collections import Counter
@@ -165,6 +180,17 @@ BRAND_NAME             = env_str("BRAND_NAME", "Jeff’s Favorite Picks")
 BENEFIT_LINE_EN        = env_str("BENEFIT_LINE_EN", "Fast Shipping · Quality Picks")
 BENEFIT_LINE_KR        = env_str("BENEFIT_LINE_KR", "빠른 배송 · 엄선된 픽")
 
+# NEW — internal links injection
+ALLOW_BODY_LINK_INJECTION = env_bool("ALLOW_BODY_LINK_INJECTION", True)
+RELATED_LINKS_MAX         = env_int("RELATED_LINKS_MAX", 3)
+RELATED_SECTION_MARKER    = env_str("RELATED_SECTION_MARKER", "<!--related-picks-->")
+
+# NEW — blog auto post
+BLOG_AUTO_POST      = env_bool("BLOG_AUTO_POST", True)
+BLOG_HANDLE         = env_str("BLOG_HANDLE", "news")
+BLOG_DEFAULT_TOPIC  = env_str("BLOG_DEFAULT_TOPIC", "Phone Accessories")
+BLOG_POST_TYPE      = env_str("BLOG_POST_TYPE", "review")  # review|compare
+
 # ─────────────────────────────────────────────────────────────
 # Flask app
 # ─────────────────────────────────────────────────────────────
@@ -225,7 +251,7 @@ def shopify_get_products(limit: int=SEO_LIMIT) -> List[Dict[str,Any]]:
     r = http("GET", f"{BASE_REST}/products.json", headers=HEADERS_REST, params={"limit": min(250, limit)})
     return r.json().get("products", [])
 
-# Paged fetcher for building keyword map (up to many products)
+# Paged fetcher
 def shopify_get_all_products(max_items: int = 2000) -> List[Dict[str,Any]]:
     out, url, params = [], f"{BASE_REST}/products.json", {"limit": 250}
     while True:
@@ -240,23 +266,26 @@ def shopify_get_all_products(max_items: int = 2000) -> List[Dict[str,Any]]:
     return out[:max_items]
 
 @retry()
-def shopify_update_seo_rest(product_id: int, meta_title: Optional[str], meta_desc: Optional[str]):
+def shopify_update_seo_rest(product_id: int, meta_title: Optional[str], meta_desc: Optional[str], body_html: Optional[str]=None):
     if DRY_RUN:
-        log.info("[DRY_RUN] REST SEO update product %s: title=%s desc=%s", product_id, meta_title, meta_desc)
+        log.info("[DRY_RUN] REST SEO update product %s: title=%s desc=%s body?%s", product_id, meta_title, meta_desc, bool(body_html))
         return {"dry_run": True}
     payload = {"product": {"id": product_id}}
     if meta_title is not None:
         payload["product"]["metafields_global_title_tag"] = meta_title
     if meta_desc is not None:
         payload["product"]["metafields_global_description_tag"] = meta_desc
+    if body_html is not None:
+        payload["product"]["body_html"] = body_html
     r = http("PUT", f"{BASE_REST}/products/{product_id}.json", headers=HEADERS_REST, json=payload)
     return r.json()
 
 @retry()
-def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_desc: Optional[str]):
+def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_desc: Optional[str], body_html: Optional[str]=None):
     if DRY_RUN:
-        log.info("[DRY_RUN] GQL SEO update %s: metaTitle=%s metaDescription=%s", resource_id, seo_title, seo_desc)
+        log.info("[DRY_RUN] GQL SEO update %s: metaTitle=%s metaDescription=%s body?%s", resource_id, seo_title, seo_desc, bool(body_html))
         return {"dry_run": True}
+    # GraphQL productUpdate allows bodyHtml + seo
     mutation = {
         "query": """
         mutation productUpdate($input: ProductInput!) {
@@ -269,7 +298,8 @@ def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_d
         "variables": {
             "input": {
                 "id": resource_id,
-                "seo": {"title": seo_title, "description": seo_desc}
+                **({"seo": {"title": seo_title, "description": seo_desc}} if (seo_title or seo_desc) else {}),
+                **({"bodyHtml": body_html} if body_html is not None else {})
             }
         }
     }
@@ -286,7 +316,7 @@ def product_gid(pid: int) -> str:
     return f"gid://shopify/Product/{pid}"
 
 # ─────────────────────────────────────────────────────────────
-# Utils for body_html generation
+# Utils (body_html / keywords)
 # ─────────────────────────────────────────────────────────────
 STOPWORDS = {
     "the","and","for","you","your","with","from","this","that","are","our","has","have","was","were","will","can","all",
@@ -333,18 +363,6 @@ def ensure_titlecase_in_product(p: dict):
         p["tags"] = ",".join([title_case(x.strip()) for x in tags.split(",") if x.strip()])
     return p
 
-def auto_alt_list(p: dict) -> List[str]:
-    """Generate ALT suggestions for every image without alt."""
-    outs = []
-    imgs = p.get("images") or []
-    title = p.get("title") or "Product"
-    for i, img in enumerate(imgs):
-        alt = ""
-        if isinstance(img, dict): alt = (img.get("alt") or "").strip()
-        if not alt:
-            outs.append(f"{title} — image {i+1}")
-    return outs
-
 def inject_auto_alt_to_images(p: dict):
     if not ALT_AUTO_GENERATE: return p
     title = p.get("title") or "Product"
@@ -378,7 +396,6 @@ def bigrams(tokens: List[str]) -> List[str]:
     return [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens)-1)]
 
 def best_keywords_from_product(p: dict, top_n: int = 8) -> List[str]:
-    """Take keywords from title + body + tags + options to reuse in body_html."""
     parts: List[str] = []
     parts.append(p.get("title") or "")
     parts.append(strip_html(p.get("body_html") or ""))
@@ -401,12 +418,9 @@ def best_keywords_from_product(p: dict, top_n: int = 8) -> List[str]:
     return key_list
 
 def make_feature_list_from_keywords(kws: List[str]) -> List[str]:
-    # Heuristic: convert tokens to readable feature bullets
     feats = []
     for kw in kws:
-        t = kw.replace("-", " ").title()
-        feats.append(t)
-    # Add generic e-com value props if not present
+        feats.append(kw.replace("-", " ").title())
     base = ["Lightweight", "Durable Materials", "Easy to Use", "Fits Most Devices", "Gift-Ready Packaging"]
     for b in base:
         if len(feats) >= 8: break
@@ -415,25 +429,20 @@ def make_feature_list_from_keywords(kws: List[str]) -> List[str]:
     return feats[:8]
 
 def build_text_body_html(p: dict) -> str:
-    """SEO optimized, text-first body_html; gallery is rendered separately (optional)."""
     title = p.get("title") or "Product"
     vendor = p.get("vendor") or BRAND_NAME
     benefit_en = BENEFIT_LINE_EN
     benefit_kr = BENEFIT_LINE_KR
 
-    # Extract keywords & bullets
     kws = best_keywords_from_product(p, top_n=10)
     bullets = make_feature_list_from_keywords(kws)
 
-    # Try to infer spec hints from variants/options
     specs: List[Tuple[str,str]] = []
     for opt in (p.get("options") or []):
         if isinstance(opt, dict) and opt.get("name") and opt.get("values"):
             name = title_case(opt["name"]) if NORMALIZE_TITLECASE else opt["name"]
             specs.append((name, ", ".join([title_case(v) if NORMALIZE_TITLECASE else v for v in opt["values"]])))
 
-    # Compose text-only HTML (no big banners; headings + bullets + small notes)
-    # Keep it compact, semantic, and index-friendly.
     body = []
     body.append(f"<div class='pdp-copy' style='line-height:1.6'>")
     body.append(f"  <h2 style='margin:0 0 .5rem 0'>{title}</h2>")
@@ -459,7 +468,6 @@ def build_text_body_html(p: dict) -> str:
     body.append("  <p style='margin-top:.75rem'>Carefully selected for everyday use. Enjoy dependable quality and friendly support.</p>")
     body.append(f"  <p><em>Tip:</em> Add to cart now — limited stock! <strong>{CTA_PHRASE}</strong>.</p>")
 
-    # (Optional) miniature gallery note; actual images are separate in Shopify but we avoid heavy HTML here
     if BODY_INCLUDE_GALLERY and (p.get('images') or []):
         body.append("  <p style='opacity:.85;font-size:.95em'>See product images above for color and style references.</p>")
 
@@ -482,7 +490,6 @@ def _slugify(title: str) -> str:
     return slug or f"prod-{int(time.time())}"
 
 def _normalize_product_payload(p: dict) -> dict:
-    # TitleCase / ALT / body_html generation
     p = ensure_titlecase_in_product(p)
     p = inject_auto_alt_to_images(p)
 
@@ -589,7 +596,7 @@ def register():
         # GET → demo create
         demo = {
             "title": "MagSafe Clear Case - iPhone 15",
-            "body_html": "",  # intentionally blank → will be auto-generated
+            "body_html": "",
             "vendor": BRAND_NAME,
             "product_type": "Phone Case",
             "tags": ["MagSafe","iPhone","Clear"],
@@ -661,7 +668,6 @@ def _get_keyword_map(limit: int, min_len: int, include_bigrams: bool, scope: str
     _kw_cache["scanned"]  = data["scanned"]
     return {**data, "cached": False, "age_sec": 0, "params": _kw_cache["params"]}
 
-# Endpoints
 @app.get("/seo/keywords/run")
 @require_auth
 def seo_keywords_run():
@@ -710,7 +716,48 @@ def seo_keywords_cache():
     })
 
 # ─────────────────────────────────────────────────────────────
-# SEO routines (keyword-weighted)
+# Internal links (Related Picks)
+# ─────────────────────────────────────────────────────────────
+def _extract_tokens_for_match(p: dict) -> set:
+    parts = [p.get("title") or "", strip_html(p.get("body_html") or "")]
+    tags = p.get("tags") or []
+    if isinstance(tags, list): parts.extend(tags)
+    elif isinstance(tags, str): parts.extend([x.strip() for x in tags.split(",") if x.strip()])
+    toks = set(filter_stopwords(tokenize(" ".join(parts), KEYWORD_MIN_LEN), KEYWORD_MIN_LEN))
+    return toks
+
+def find_related_products(target: dict, candidates: List[dict], k: int) -> List[dict]:
+    tgt = _extract_tokens_for_match(target)
+    scored = []
+    for c in candidates:
+        if c.get("id") == target.get("id"): continue
+        cset = _extract_tokens_for_match(c)
+        score = len(tgt & cset)
+        if score > 0:
+            scored.append((score, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _,c in scored[:max(0,k)]]
+
+def inject_related_links(body_html: str, related: List[dict]) -> str:
+    if not related: return body_html
+    if RELATED_SECTION_MARKER in (body_html or ""):  # idempotent
+        return body_html
+    lis = []
+    for rp in related:
+        url = f"/products/{rp.get('handle')}"
+        title = rp.get("title") or "View product"
+        lis.append(f'<li><a href="{url}">{title}</a></li>')
+    block = "\n".join([
+        RELATED_SECTION_MARKER,
+        "<h3>Related Picks</h3>",
+        "<ul>",
+        *lis,
+        "</ul>"
+    ])
+    return (body_html or "") + "\n\n" + block
+
+# ─────────────────────────────────────────────────────────────
+# SEO routines (keyword-weighted + long-tail bias + internal links)
 # ─────────────────────────────────────────────────────────────
 def _ensure_list(v):
     return v if isinstance(v, list) else ([v] if v else [])
@@ -722,6 +769,9 @@ def _score_kw(kw: str, title: str, body: str, tags: List[str], boost_set: set) -
     if re.search(kw_re, body):  s += 1.0
     if any(kw in (t or "").lower() for t in tags): s += 1.5
     if kw in boost_set: s *= 1.5
+    # NEW: long-tail length bonus
+    if " " in kw: s *= 1.25
+    if len(kw) >= 14: s *= 1.1
     return s
 
 def _compose_title(primary: str, benefit: str, cta: str) -> str:
@@ -763,6 +813,7 @@ def seo_optimize():
     force        = str(request.args.get("force","false")).lower() in ("1","true","yes","on","y")
     force_kw     = str(request.args.get("force_keywords","false")).lower() in ("1","true","yes","on","y")
     kw_top_n     = int(request.args.get("kw_top_n", KW_TOP_N_FOR_WEIGHT) or KW_TOP_N_FOR_WEIGHT)
+    inject_rel   = str(request.args.get("related_links", str(ALLOW_BODY_LINK_INJECTION))).lower() in ("1","true","yes","on","y")
 
     km = _get_keyword_map(limit=max(kw_top_n, KEYWORD_LIMIT_DEFAULT),
                           min_len=KEYWORD_MIN_LEN,
@@ -775,6 +826,9 @@ def seo_optimize():
 
     prods = shopify_get_products(limit=max(limit, 50))
     targets = prods[:limit] if not rotate else prods[:limit]
+
+    # preload for related
+    all_candidates = shopify_get_all_products(max_items=600) if inject_rel else []
 
     changed, errors = [], []
     benefit = "Fast Shipping · Quality Picks"
@@ -792,6 +846,7 @@ def seo_optimize():
             scored_uni = sorted([(kw, _score_kw(kw, title_raw, body_raw, tags_list, boost_set)) for kw in top_unigrams], key=lambda x: x[1], reverse=True)
 
             chosen: List[str] = []
+            # prefer long-tail (bigrams) first
             for kw,sc in scored_bi:
                 if sc <= 0: continue
                 chosen.append(kw)
@@ -810,16 +865,26 @@ def seo_optimize():
             existing_title = p.get("metafields_global_title_tag")
             existing_desc  = p.get("metafields_global_description_tag")
             def ok_len(s, mx): return s and (15 <= len(s.strip()) <= mx)
-            if (not force) and ok_len(existing_title, TITLE_MAX_LEN) and ok_len(existing_desc, DESC_MAX_LEN):
+
+            # optional Related Picks injection (idempotent)
+            new_body = None
+            if inject_rel and RELATED_LINKS_MAX > 0:
+                rel = find_related_products(p, all_candidates, RELATED_LINKS_MAX)
+                if rel:
+                    if RELATED_SECTION_MARKER not in (p.get("body_html") or ""):
+                        new_body = inject_related_links(p.get("body_html") or "", rel)
+
+            # If SEO ok & no body change, skip unless force
+            if (not force) and ok_len(existing_title, TITLE_MAX_LEN) and ok_len(existing_desc, DESC_MAX_LEN) and (new_body is None):
                 changed.append({"id": pid, "handle": p.get("handle"), "skipped_reason": "existing_seo_ok"})
                 continue
 
             if USE_GRAPHQL:
-                res = shopify_update_seo_graphql(gid, meta_title, meta_desc)
+                res = shopify_update_seo_graphql(gid, meta_title, meta_desc, body_html=new_body)
                 if not res.get("ok", True):
-                    res = shopify_update_seo_rest(pid, meta_title, meta_desc)
+                    res = shopify_update_seo_rest(pid, meta_title, meta_desc, body_html=new_body)
             else:
-                res = shopify_update_seo_rest(pid, meta_title, meta_desc)
+                res = shopify_update_seo_rest(pid, meta_title, meta_desc, body_html=new_body)
 
             changed.append({
                 "id": pid,
@@ -828,6 +893,7 @@ def seo_optimize():
                 "metaDesc": meta_desc,
                 "keywords_used": chosen[:5],
                 "altSuggestions": ensure_alt_suggestions(p),
+                "body_updated": bool(new_body is not None),
                 "result": res
             })
         except Exception as e:
@@ -853,6 +919,102 @@ def seo_optimize():
 @require_auth
 def run_seo_alias():
     return seo_optimize()
+
+# ─────────────────────────────────────────────────────────────
+# Blog Auto-Post (review / compare)
+# ─────────────────────────────────────────────────────────────
+def _get_blog_id_by_handle(handle: str) -> Optional[str]:
+    q = {
+        "query": """
+        query($handle: String!) {
+          blogByHandle(handle: $handle) { id title handle }
+        }
+        """,
+        "variables": {"handle": handle}
+    }
+    try:
+        r = http("POST", BASE_GRAPHQL, headers=HEADERS_GQL, json=q)
+        data = r.json().get("data", {})
+        b = (data.get("blogByHandle") or {})
+        return b.get("id")
+    except Exception as e:
+        log.exception("blogByHandle failed: %s", e)
+        return None
+
+def _article_create(blog_id: str, title: str, html: str, tags: List[str]) -> Dict[str,Any]:
+    if DRY_RUN:
+        log.info("[DRY_RUN] Article create: %s", title)
+        return {"dry_run": True}
+    m = {
+        "query": """
+        mutation articleCreate($input: ArticleInput!) {
+          articleCreate(input: $input) {
+            article { id handle onlineStoreUrl title }
+            userErrors { field message }
+          }
+        }
+        """,
+        "variables": {"input": {"title": title, "contentHtml": html, "blogId": blog_id, "tags": tags}}
+    }
+    r = http("POST", BASE_GRAPHQL, headers=HEADERS_GQL, json=m)
+    data = r.json().get("data", {}).get("articleCreate")
+    errs = (data or {}).get("userErrors") or []
+    if errs:
+        return {"ok": False, "errors": errs}
+    return {"ok": True, "article": (data or {}).get("article")}
+
+def _blog_template(topic: str, products: List[dict], post_type: str, keywords: List[str]) -> Tuple[str,str]:
+    # title
+    n = len(products)
+    if post_type == "compare" and n >= 2:
+        title = f"{products[0]['title']} vs {products[1]['title']} — Which {topic} is Best?"
+    else:
+        title = f"Top {n} {topic} in 2025 — Reviews & Buying Guide"
+
+    # body
+    intro = f"<p>Looking for the best {topic}? Here’s our curated list with pros & cons, based on real features and compatibility.</p>"
+    body = [f"<h2>{title}</h2>", intro]
+
+    for i, p in enumerate(products, 1):
+        purl = f"/products/{p['handle']}"
+        body.append(f"<h3>{i}. {p['title']}</h3>")
+        body.append(f"<p><strong>Pros:</strong> Stylish, durable, easy to use.<br><strong>Cons:</strong> Check sizes/colors before you buy.</p>")
+        body.append(f"<p><a href='{purl}'>Check {p['title']} &rarr;</a></p>")
+
+    outro = "<p>All items are curated by Jeff’s Favorite Picks. Limited stock — grab yours today!</p>"
+    kw = f"<p>Popular keywords: {', '.join(keywords[:5])}</p>" if keywords else ""
+    html = "\n".join(body + [outro, kw])
+    return title, html
+
+@app.post("/blog/auto-post")
+@require_auth
+def blog_auto_post():
+    if not BLOG_AUTO_POST:
+        return jsonify({"ok": False, "error": "BLOG_AUTO_POST disabled"}), 400
+
+    body = request.get_json(silent=True) or {}
+    topic = body.get("topic") or BLOG_DEFAULT_TOPIC
+    post_type = (body.get("type") or BLOG_POST_TYPE or "review").lower()
+    pick_n = int(body.get("pick_n") or 5)
+    tags   = body.get("tags") or [topic, "auto", "review" if post_type=="review" else "compare"]
+
+    # choose products
+    allp = shopify_get_all_products(max_items=500)
+    if not allp: return jsonify({"ok": False, "error": "no products"}), 400
+    random.shuffle(allp)
+    products = allp[:max(2, min(8, pick_n))]
+
+    # keywords for highlight
+    km = _get_keyword_map(limit=80, min_len=KEYWORD_MIN_LEN, include_bigrams=True, scope="all", force=False)
+    kws = [k for k,_ in (km["bigrams"] or [])][:10] + [k for k,_ in km["unigrams"]][:10]
+
+    title, html = _blog_template(topic, products, post_type, kws)
+    blog_id = _get_blog_id_by_handle(BLOG_HANDLE)
+    if not blog_id:
+        return jsonify({"ok": False, "error": f"blog handle '{BLOG_HANDLE}' not found"}), 400
+
+    res = _article_create(blog_id, title, html, tags)
+    return jsonify({"ok": True, "topic": topic, "type": post_type, "article": res})
 
 # ─────────────────────────────────────────────────────────────
 # Email (SendGrid)
@@ -1067,6 +1229,7 @@ def root():
         "routes": f"{base}__routes?auth=***",
         "run_seo": f"{base}run-seo?auth=***&limit=10&rotate=true",
         "register_demo": f"{base}register?auth=***",
+        "blog_demo": f"{base}blog/auto-post?auth=*** (POST topic/type)",
     })
 
 @app.get("/__routes")
@@ -1087,6 +1250,7 @@ def health():
         "email_enabled": ENABLE_EMAIL,
         "bing_ping": ENABLE_BING_PING,
         "gsc_sitemap_submit": ENABLE_GSC_SITEMAP_SUBMIT,
+        "blog_auto_post": BLOG_AUTO_POST,
         "ts": dt.datetime.utcnow().isoformat()+"Z"
     })
 
