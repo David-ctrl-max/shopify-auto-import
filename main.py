@@ -1,26 +1,26 @@
 # main.py — Unified Pro (Register + Auto Body HTML + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow + Blog Auto-Post + Intent + Orphan/Speed Report + Share Snippets)
 # =========================================================================================================
-# ✅ What’s included (2025-10-02)
+# ✅ What’s included (2025-10-02, patched)
 # - /register (GET/POST)          : real Shopify product creation (images/options/variants/inventory)
 #   ↳ Auto body_html(text-first), ALT auto, TitleCase normalize, Story/Pros&Cons/Differentiators
 # - /seo/optimize                 : keyword-weighted SEO meta (title/desc) + Long-tail bias + Intent aware
-#   ↳ NEW: Related Picks internal links injection (idempotent) + seasonal/click phrases
+#   ↳ NEW: Related Picks internal links injection (idempotent, top+bottom) + seasonal/click phrases
 # - /run-seo                      : alias to /seo/optimize (cron)
-# - /seo/keywords/run             : build keyword map (unigram/bigram), + NEW intent tags per keyword
+# - /seo/keywords/run             : build keyword map (unigram/bigram), + intent tags per keyword
 # - /seo/keywords/cache           : keyword cache status
 # - /blog/auto-post               : review/compare article generator + min 3 internal links + share snippets
-# - /sitemap-products.xml         : product-only sitemap (canonical domain aware)
-# - /robots.txt                   : robots with Sitemap lines
+# - /sitemap-index.xml            : sitemap index (host main + this service’s product sitemap)
+# - /sitemap-products.xml         : product-only sitemap (canonical domain aware, real lastmod, image:image)
+# - /robots.txt                   : robots with Sitemap lines (+ sitemap-index)
 # - /bing/ping                    : 410 Gone 안내 (Bing sitemap ping deprecated)
 # - /indexnow/submit              : IndexNow 제출
 # - /gsc/sitemap/submit           : optional Search Console sitemap submit
-# - /report/daily                 : EN/KR daily email; + NEW orphaned-page suspects + speed(WebP/LazyLoad) checks
+# - /report/daily                 : EN/KR daily email; orphaned-page suspects + speed(WebP/LazyLoad) checks
 # - /health, /__routes, /         : diagnostics
 #
 # 🔐 Auth: use ?auth=<IMPORT_AUTH_TOKEN>  (or header X-Auth)
 # =========================================================================================================
 # 🌎 Environment (Render)
-# (기존 동일 + 아래 NEW 항목)
 # IMPORT_AUTH_TOKEN=jeffshopsecure
 # SHOPIFY_STORE=jeffsfavoritepicks
 # SHOPIFY_API_VERSION=2025-07
@@ -77,6 +77,7 @@
 # ALLOW_BODY_LINK_INJECTION=true
 # RELATED_LINKS_MAX=3
 # RELATED_SECTION_MARKER="<!--related-picks-->"
+# RELATED_TOP_MARKER="<!--related-picks-top-->"   # NEW
 #
 # # Blog auto post
 # BLOG_AUTO_POST=true
@@ -84,7 +85,7 @@
 # BLOG_DEFAULT_TOPIC="Phone Accessories"
 # BLOG_POST_TYPE=review  # review|compare
 #
-# # NEW — Intent/Report tuning
+# # Intent/Report tuning
 # INTENT_CLASSIFY=true
 # ORPHAN_LINK_MIN=1              # body_html 내 내부 링크 수가 이 값보다 작으면 orphan 의심
 # SPEED_WEBP_THRESHOLD=0.6       # 이미지 WebP 비율 기준 (예: 0.6=60% 이상 권장)
@@ -190,6 +191,7 @@ BENEFIT_LINE_KR        = env_str("BENEFIT_LINE_KR", "빠른 배송 · 엄선된 
 ALLOW_BODY_LINK_INJECTION = env_bool("ALLOW_BODY_LINK_INJECTION", True)
 RELATED_LINKS_MAX         = env_int("RELATED_LINKS_MAX", 3)
 RELATED_SECTION_MARKER    = env_str("RELATED_SECTION_MARKER", "<!--related-picks-->")
+RELATED_TOP_MARKER        = env_str("RELATED_TOP_MARKER", "<!--related-picks-top-->")  # NEW
 
 # Blog auto post
 BLOG_AUTO_POST      = env_bool("BLOG_AUTO_POST", True)
@@ -197,7 +199,7 @@ BLOG_HANDLE         = env_str("BLOG_HANDLE", "news")
 BLOG_DEFAULT_TOPIC  = env_str("BLOG_DEFAULT_TOPIC", "Phone Accessories")
 BLOG_POST_TYPE      = env_str("BLOG_POST_TYPE", "review")  # review|compare
 
-# NEW — Intent/Report tuning
+# Intent/Report tuning
 INTENT_CLASSIFY        = env_bool("INTENT_CLASSIFY", True)
 ORPHAN_LINK_MIN        = env_int("ORPHAN_LINK_MIN", 1)
 SPEED_WEBP_THRESHOLD   = float(env_str("SPEED_WEBP_THRESHOLD", "0.6"))
@@ -357,7 +359,6 @@ def classify_intent_from_text(text: str) -> str:
     for intent, keys in INTENT_LEX.items():
         for k in keys:
             if k in t: score[intent] += 1
-    # heuristic: body > title > tags 가중치 등은 상위 호출부에서 텍스트 합성으로 대체
     intent = max(score, key=score.get)
     return intent if score[intent] > 0 else "unknown"
 
@@ -779,7 +780,7 @@ def find_related_products(target: dict, candidates: List[dict], k: int) -> List[
     scored.sort(key=lambda x: x[0], reverse=True)
     return [c for _,c in scored[:max(0,k)]]
 
-def inject_related_links(body_html: str, related: List[dict]) -> str:
+def inject_related_links_bottom(body_html: str, related: List[dict]) -> str:
     if not related: return body_html
     if RELATED_SECTION_MARKER in (body_html or ""):  # idempotent
         return body_html
@@ -796,6 +797,20 @@ def inject_related_links(body_html: str, related: List[dict]) -> str:
         "</ul>"
     ])
     return (body_html or "") + "\n\n" + block
+
+def inject_related_links_top(html: str, related: List[dict]) -> str:
+    """Insert a compact 'Quick Picks' inline block after the first paragraph. Idempotent via RELATED_TOP_MARKER."""
+    if not related or RELATED_TOP_MARKER in (html or ""):
+        return html
+    picks = []
+    for rp in related[:2]:
+        url = f"/products/{rp.get('handle')}"
+        title = rp.get("title") or "View product"
+        picks.append(f'<a href="{url}">{title}</a>')
+    block = RELATED_TOP_MARKER + f'\n<p>Quick Picks: {" · ".join(picks)}</p>\n'
+    if "</p>" in (html or ""):
+        return re.sub(r"(</p>)", r"\1\n" + block, html, count=1)
+    return block + (html or "")
 
 def count_internal_links(body_html: str) -> int:
     if not body_html: return 0
@@ -821,7 +836,6 @@ def _score_kw(kw: str, title: str, body: str, tags: List[str], boost_set: set) -
 def _compose_title(primary: str, benefit: str, cta: str) -> str:
     seasonal = ""
     for w in SEASONAL_WORDS:
-        # 간단한 길이 제약 하에서만 추가
         if len(primary) + len(" | ") + len(benefit) + len(" – ") + len(cta) + len(" · ") + len(w) <= TITLE_MAX_LEN:
             seasonal = f" · {w}"
             break
@@ -841,7 +855,7 @@ def _compose_desc(keywords: List[str], base_body: str, cta: str) -> str:
         desc = f"{base_desc}. {cta}."
     else:
         desc = f"Curated picks for everyday use. {cta}."
-    return (desc[:DESC_MAX_LEN]).rstrip(" .,")  # 160자 안전
+    return (desc[:DESC_MAX_LEN]).rstrip(" .,")
 
 def ensure_alt_suggestions(p: Dict[str,Any]) -> List[str]:
     suggestions = []
@@ -886,11 +900,12 @@ def seo_optimize():
         gid = product_gid(pid)
         try:
             title_raw = (p.get("title") or "")
-            body_raw  = strip_html(p.get("body_html") or "")
+            body_current_html = p.get("body_html") or ""
+            body_raw  = strip_html(body_current_html)
             tags_list = p.get("tags") if isinstance(p.get("tags"), list) else \
                         ([x.strip() for x in (p.get("tags") or "").split(",")] if isinstance(p.get("tags"), str) else [])
 
-            # Intent: title + body + tags 합성 후 분류
+            # Intent
             intent_input = " ".join([title_raw, body_raw, " ".join(tags_list)])
             intent = classify_intent_from_text(intent_input)
 
@@ -913,7 +928,7 @@ def seo_optimize():
 
             primary = (chosen[0] if chosen else (p.get("title","").split(" ",1)[0] or "Best Picks"))
 
-            # Intent에 따른 미세 조정(타이틀/디스크립션 어조)
+            # Intent tone
             benefit_intent = {
                 "informational": "Quick Tips · Honest Reviews",
                 "commercial":    "Top Picks · Expert Compare",
@@ -928,12 +943,20 @@ def seo_optimize():
             existing_desc  = p.get("metafields_global_description_tag")
             def ok_len(s, mx): return s and (15 <= len(s.strip()) <= mx)
 
-            # Related Picks injection (idempotent)
+            # Related Picks injection (idempotent; TOP then BOTTOM)
             new_body = None
+            updated_html = body_current_html
             if inject_rel and RELATED_LINKS_MAX > 0:
                 rel = find_related_products(p, all_candidates, RELATED_LINKS_MAX)
-                if rel and RELATED_SECTION_MARKER not in (p.get("body_html") or ""):
-                    new_body = inject_related_links(p.get("body_html") or "", rel)
+                if rel:
+                    # top injection
+                    if RELATED_TOP_MARKER not in updated_html:
+                        updated_html = inject_related_links_top(updated_html, rel)
+                    # bottom injection
+                    if RELATED_SECTION_MARKER not in updated_html:
+                        updated_html = inject_related_links_bottom(updated_html, rel)
+                    if updated_html != body_current_html:
+                        new_body = updated_html
 
             # Skip if SEO ok and no body update unless force
             if (not force) and ok_len(existing_title, TITLE_MAX_LEN) and ok_len(existing_desc, DESC_MAX_LEN) and (new_body is None):
@@ -957,7 +980,7 @@ def seo_optimize():
                 "intent": intent,
                 "altSuggestions": ensure_alt_suggestions(p),
                 "body_updated": bool(new_body is not None),
-                "internal_link_count": count_internal_links(new_body if new_body is not None else (p.get("body_html") or "")),
+                "internal_link_count": count_internal_links(new_body if new_body is not None else body_current_html),
                 "result": res
             })
         except Exception as e:
@@ -1125,7 +1148,7 @@ def blog_auto_post():
     })
 
 # ─────────────────────────────────────────────────────────────
-# Sitemap (products-only) + Robots
+# Sitemap (index + products) + Robots
 # ─────────────────────────────────────────────────────────────
 def _abs_product_url(handle: str) -> str:
     host = CANONICAL_DOMAIN or f"{SHOPIFY_STORE}.myshopify.com"
@@ -1134,19 +1157,67 @@ def _abs_product_url(handle: str) -> str:
 def _xml_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;").replace("'","&apos;")
 
+def _to_rfc3339_utc(ts: Optional[str]) -> str:
+    """Convert Shopify timestamp to UTC Z format. Fallback to now if missing/invalid."""
+    if not ts:
+        return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        # Python 3.11: fromisoformat supports offsets like 2025-10-01T12:34:56-04:00
+        d = dt.datetime.fromisoformat(ts.replace("Z","+00:00"))
+        if d.tzinfo is not None:
+            d = d.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+@app.get("/sitemap-index.xml")
+def sitemap_index():
+    host = CANONICAL_DOMAIN or f"{SHOPIFY_STORE}.myshopify.com"
+    now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # include host's primary sitemap and this service's product sitemap
+    items = [
+        f"<sitemap><loc>{_xml_escape(PRIMARY_SITEMAP or f'https://{host}/sitemap.xml')}</loc><lastmod>{now}</lastmod></sitemap>",
+    ]
+    if PUBLIC_BASE:
+        items.append(f"<sitemap><loc>{_xml_escape(PUBLIC_BASE + '/sitemap-products.xml')}</loc><lastmod>{now}</lastmod></sitemap>")
+    body = "\n".join([
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+        *items,
+        '</sitemapindex>'
+    ])
+    return Response(body, mimetype="application/xml")
+
 @app.get("/sitemap-products.xml")
 def sitemap_products():
     try:
         prods = shopify_get_all_products(max_items=5000)
         urls = []
-        now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         for p in prods:
-            if not p.get("handle"): continue
-            loc = _abs_product_url(p["handle"])
-            urls.append(f"<url><loc>{_xml_escape(loc)}</loc><lastmod>{now}</lastmod><changefreq>weekly</changefreq><priority>0.7</priority></url>")
+            handle = p.get("handle")
+            if not handle: continue
+            loc = _abs_product_url(handle)
+
+            # Prefer updated_at → published_at → now
+            lastmod = _to_rfc3339_utc(p.get("updated_at") or p.get("published_at"))
+
+            # image:image tag for better indexing (limit to 6 images)
+            imgs = p.get("images") or []
+            img_xml = []
+            for im in imgs[:6]:
+                src = im.get("src") if isinstance(im, dict) else (str(im) if im else "")
+                if src:
+                    img_xml.append(f"<image:image><image:loc>{_xml_escape(src)}</image:loc></image:image>")
+
+            urls.append(
+                f"<url><loc>{_xml_escape(loc)}</loc><lastmod>{lastmod}</lastmod>"
+                f"<changefreq>weekly</changefreq><priority>0.7</priority>{''.join(img_xml)}</url>"
+            )
+
         body = "\n".join([
             '<?xml version="1.0" encoding="UTF-8"?>',
-            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+            'xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
             *urls,
             "</urlset>"
         ])
@@ -1164,9 +1235,9 @@ def robots_txt():
         "",
         f"Sitemap: https://{host}/sitemap.xml",
     ]
-    # Also advertise this service sitemap for product-only (optional)
     if PUBLIC_BASE:
         lines.append(f"Sitemap: {PUBLIC_BASE}/sitemap-products.xml")
+        lines.append(f"Sitemap: {PUBLIC_BASE}/sitemap-index.xml")  # NEW: advertise index too
     return Response("\n".join(lines) + "\n", mimetype="text/plain")
 
 # ─────────────────────────────────────────────────────────────
@@ -1200,7 +1271,6 @@ def indexnow_submit():
     urls = body.get("urls") or []
 
     if not urls:
-        # Build URLs from current products as a convenience
         prods = shopify_get_products(limit=250)
         urls = [_abs_product_url(p["handle"]) for p in prods if p.get("handle")]
 
@@ -1264,7 +1334,6 @@ def _image_webp_ratio(p: dict) -> float:
         src = (im.get("src") if isinstance(im, dict) else str(im)) or ""
         if not src: continue
         total += 1
-        # naive check by extension or query
         if ".webp" in src.lower(): webp += 1
     return (webp / total) if total > 0 else 0.0
 
@@ -1272,12 +1341,10 @@ def _orphan_suspect(p: dict) -> bool:
     return count_internal_links(p.get("body_html") or "") < ORPHAN_LINK_MIN
 
 def _report_html(summary: Dict[str, Any]) -> str:
-    # bilingual header as per user's preference
     lines = []
     lines.append("<div style='font-family:system-ui,Segoe UI,Arial'>")
     lines.append("<h2>Daily SEO Report / 일일 SEO 점검 리포트</h2>")
     lines.append(f"<p>Generated (UTC): {dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</p>")
-    # Summary table
     lines.append("<h3>Summary / 요약</h3>")
     lines.append("<ul>")
     lines.append(f"<li>Products scanned: {summary['scanned']}</li>")
@@ -1286,7 +1353,6 @@ def _report_html(summary: Dict[str, Any]) -> str:
     lines.append(f"<li>Below WebP threshold (>{int(SPEED_WEBP_THRESHOLD*100)}% target): {len(summary['below_threshold'])}</li>")
     lines.append("</ul>")
 
-    # Orphans
     if summary["orphans"]:
         lines.append("<h3>Orphaned-Page Suspects (내부 링크 부족)</h3>")
         lines.append("<ol>")
@@ -1297,7 +1363,6 @@ def _report_html(summary: Dict[str, Any]) -> str:
     else:
         lines.append("<p>No orphan suspects. 🎉</p>")
 
-    # Below WebP
     if summary["below_threshold"]:
         lines.append("<h3>WebP Ratio Below Threshold (이미지 WebP 비율 낮음)</h3>")
         lines.append("<ol>")
@@ -1309,7 +1374,6 @@ def _report_html(summary: Dict[str, Any]) -> str:
     else:
         lines.append("<p>All products meet WebP ratio target. ✅</p>")
 
-    # Tips
     lines.append("<h3>Tips</h3>")
     lines.append("<ul>")
     lines.append("<li>Add 2–3 internal links (Related Picks) into low-link product pages.</li>")
@@ -1383,7 +1447,7 @@ def root():
     return jsonify({
         "ok": True,
         "name": "Unified Pro (Register + SEO + Keywords + Blog + Sitemap + Email + IndexNow + Reports)",
-        "version": "2025-10-02",
+        "version": "2025-10-02+patch",
         "public_base": PUBLIC_BASE,
         "store": SHOPIFY_STORE,
         "canonical_domain": CANONICAL_DOMAIN,
@@ -1396,5 +1460,6 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)
+
 
 
