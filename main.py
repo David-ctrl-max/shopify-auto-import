@@ -1,26 +1,26 @@
-# main.py — Unified Pro (Register + Auto Body HTML + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow + Blog Auto-Post)
+# main.py — Unified Pro (Register + Auto Body HTML + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow + Blog Auto-Post + Intent + Orphan/Speed Report + Share Snippets)
 # =========================================================================================================
-# ✅ What’s included
+# ✅ What’s included (2025-10-02)
 # - /register (GET/POST)          : real Shopify product creation (images/options/variants/inventory)
-#   ↳ Auto body_html(text-first), ALT auto, TitleCase normalize
-# - /seo/optimize                 : rotate N products; keyword-weighted SEO meta (title/desc) with CTA
-#   ↳ NEW: Long-tail bias, optional Related Picks internal links injection (safe, idempotent)
+#   ↳ Auto body_html(text-first), ALT auto, TitleCase normalize, Story/Pros&Cons/Differentiators
+# - /seo/optimize                 : keyword-weighted SEO meta (title/desc) + Long-tail bias + Intent aware
+#   ↳ NEW: Related Picks internal links injection (idempotent) + seasonal/click phrases
 # - /run-seo                      : alias to /seo/optimize (cron)
-# - /seo/keywords/run             : build keyword map (unigram/bigram), optional CSV save
+# - /seo/keywords/run             : build keyword map (unigram/bigram), + NEW intent tags per keyword
 # - /seo/keywords/cache           : keyword cache status
-# - /blog/auto-post               : NEW review/compare style blog generator + Shopify Article create
+# - /blog/auto-post               : review/compare article generator + min 3 internal links + share snippets
 # - /sitemap-products.xml         : product-only sitemap (canonical domain aware)
 # - /robots.txt                   : robots with Sitemap lines
 # - /bing/ping                    : 410 Gone 안내 (Bing sitemap ping deprecated)
 # - /indexnow/submit              : IndexNow 제출
 # - /gsc/sitemap/submit           : optional Search Console sitemap submit
-# - /report/daily                 : EN/KR daily email summary (SendGrid)
+# - /report/daily                 : EN/KR daily email; + NEW orphaned-page suspects + speed(WebP/LazyLoad) checks
 # - /health, /__routes, /         : diagnostics
 #
 # 🔐 Auth: use ?auth=<IMPORT_AUTH_TOKEN>  (or header X-Auth)
 # =========================================================================================================
 # 🌎 Environment (Render)
-# (기존 동일 + 아래 NEW 항목 확인)
+# (기존 동일 + 아래 NEW 항목)
 # IMPORT_AUTH_TOKEN=jeffshopsecure
 # SHOPIFY_STORE=jeffsfavoritepicks
 # SHOPIFY_API_VERSION=2025-07
@@ -73,16 +73,22 @@
 # BENEFIT_LINE_EN="Fast Shipping · Quality Picks"
 # BENEFIT_LINE_KR="빠른 배송 · 엄선된 픽"
 #
-# # NEW — Internal links injection
-# ALLOW_BODY_LINK_INJECTION=true          # /seo/optimize 중 Related Picks 자동 삽입 허용
-# RELATED_LINKS_MAX=3                      # 본문 하단에 최대 몇 개 링크 삽입
-# RELATED_SECTION_MARKER="<!--related-picks-->"  # 중복 삽입 방지 마커
+# # Internal links injection
+# ALLOW_BODY_LINK_INJECTION=true
+# RELATED_LINKS_MAX=3
+# RELATED_SECTION_MARKER="<!--related-picks-->"
 #
-# # NEW — Blog auto post
+# # Blog auto post
 # BLOG_AUTO_POST=true
-# BLOG_HANDLE=news                        # Shopify 블로그 handle (Online Store > Blog posts)
-# BLOG_DEFAULT_TOPIC="Phone Accessories"  # 기본 토픽
-# BLOG_POST_TYPE=review                   # review|compare (기본 템플릿 선택)
+# BLOG_HANDLE=news
+# BLOG_DEFAULT_TOPIC="Phone Accessories"
+# BLOG_POST_TYPE=review  # review|compare
+#
+# # NEW — Intent/Report tuning
+# INTENT_CLASSIFY=true
+# ORPHAN_LINK_MIN=1              # body_html 내 내부 링크 수가 이 값보다 작으면 orphan 의심
+# SPEED_WEBP_THRESHOLD=0.6       # 이미지 WebP 비율 기준 (예: 0.6=60% 이상 권장)
+# SEASONAL_WORDS="2025 New, Free Shipping, Limited Stock"
 # =========================================================================================================
 
 import os, sys, json, time, base64, pathlib, logging, re, random
@@ -105,7 +111,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("seo-automation")
 
-# Optional file log (best-effort)
+# file log (best-effort)
 try:
     logs_dir = pathlib.Path("logs"); logs_dir.mkdir(exist_ok=True)
     fh = logging.FileHandler(logs_dir / "app.log")
@@ -180,16 +186,22 @@ BRAND_NAME             = env_str("BRAND_NAME", "Jeff’s Favorite Picks")
 BENEFIT_LINE_EN        = env_str("BENEFIT_LINE_EN", "Fast Shipping · Quality Picks")
 BENEFIT_LINE_KR        = env_str("BENEFIT_LINE_KR", "빠른 배송 · 엄선된 픽")
 
-# NEW — internal links injection
+# Internal links
 ALLOW_BODY_LINK_INJECTION = env_bool("ALLOW_BODY_LINK_INJECTION", True)
 RELATED_LINKS_MAX         = env_int("RELATED_LINKS_MAX", 3)
 RELATED_SECTION_MARKER    = env_str("RELATED_SECTION_MARKER", "<!--related-picks-->")
 
-# NEW — blog auto post
+# Blog auto post
 BLOG_AUTO_POST      = env_bool("BLOG_AUTO_POST", True)
 BLOG_HANDLE         = env_str("BLOG_HANDLE", "news")
 BLOG_DEFAULT_TOPIC  = env_str("BLOG_DEFAULT_TOPIC", "Phone Accessories")
 BLOG_POST_TYPE      = env_str("BLOG_POST_TYPE", "review")  # review|compare
+
+# NEW — Intent/Report tuning
+INTENT_CLASSIFY        = env_bool("INTENT_CLASSIFY", True)
+ORPHAN_LINK_MIN        = env_int("ORPHAN_LINK_MIN", 1)
+SPEED_WEBP_THRESHOLD   = float(env_str("SPEED_WEBP_THRESHOLD", "0.6"))
+SEASONAL_WORDS         = [w.strip() for w in env_str("SEASONAL_WORDS","2025 New, Free Shipping, Limited Stock").split(",") if w.strip()]
 
 # ─────────────────────────────────────────────────────────────
 # Flask app
@@ -262,7 +274,7 @@ def shopify_get_all_products(max_items: int = 2000) -> List[Dict[str,Any]]:
         link = r.headers.get("Link", "")
         m = re.search(r'<([^>]+)>;\s*rel="next"', link)
         if not m: break
-        url, params = m.group(1), {}  # page_info already embedded
+        url, params = m.group(1), {}
     return out[:max_items]
 
 @retry()
@@ -282,11 +294,6 @@ def shopify_update_seo_rest(product_id: int, meta_title: Optional[str], meta_des
 
 @retry()
 def shopify_update_seo_graphql(resource_id: str, seo_title: Optional[str], seo_desc: Optional[str], body_html: Optional[str]=None):
-    """
-    ✅ Shopify 최신 스키마 반영:
-       - 본문 필드: descriptionHtml
-       - 반환 필드: product { id title descriptionHtml seo { title description } }
-    """
     if DRY_RUN:
         log.info("[DRY_RUN] GQL SEO update %s: metaTitle=%s metaDescription=%s body?%s",
                  resource_id, seo_title, seo_desc, bool(body_html))
@@ -322,7 +329,7 @@ def product_gid(pid: int) -> str:
     return f"gid://shopify/Product/{pid}"
 
 # ─────────────────────────────────────────────────────────────
-# Utils (body_html / keywords)
+# Utils (body_html / keywords / intent)
 # ─────────────────────────────────────────────────────────────
 STOPWORDS = {
     "the","and","for","you","your","with","from","this","that","are","our","has","have","was","were","will","can","all",
@@ -336,6 +343,23 @@ STOPWORDS = {
     "magnetic","magsafe","wireless","charger","charging","usb","type-c","cable","cables","adapter","adapters",
     "band","bands","watch","watches","airpods","earbuds",
 }
+
+INTENT_LEX = {
+    "informational": ["how", "what", "guide", "tips", "tutorial", "review", "size guide", "faq", "benefits", "pros", "cons"],
+    "commercial":    ["best", "top", "compare", "vs", "versus", "brands", "recommend", "recommendation", "deal", "discount"],
+    "transactional": ["buy", "price", "coupon", "free shipping", "order", "checkout", "shop", "sale"]
+}
+
+def classify_intent_from_text(text: str) -> str:
+    if not INTENT_CLASSIFY: return "unknown"
+    t = (text or "").lower()
+    score = {"informational":0, "commercial":0, "transactional":0}
+    for intent, keys in INTENT_LEX.items():
+        for k in keys:
+            if k in t: score[intent] += 1
+    # heuristic: body > title > tags 가중치 등은 상위 호출부에서 텍스트 합성으로 대체
+    intent = max(score, key=score.get)
+    return intent if score[intent] > 0 else "unknown"
 
 def strip_html(text: str) -> str:
     text = (text or "")
@@ -354,14 +378,12 @@ def title_case(s: str) -> str:
 
 def ensure_titlecase_in_product(p: dict):
     if not NORMALIZE_TITLECASE: return p
-    # options
     opts = p.get("options") or []
     for opt in opts:
         if isinstance(opt, dict):
             if opt.get("name"): opt["name"] = title_case(opt["name"])
             if isinstance(opt.get("values"), list):
                 opt["values"] = [title_case(v) for v in opt["values"]]
-    # tags
     tags = p.get("tags")
     if isinstance(tags, list):
         p["tags"] = [title_case(t) for t in tags]
@@ -405,11 +427,9 @@ def best_keywords_from_product(p: dict, top_n: int = 8) -> List[str]:
     parts: List[str] = []
     parts.append(p.get("title") or "")
     parts.append(strip_html(p.get("body_html") or ""))
-    # tags
     tags = p.get("tags")
     if isinstance(tags, list): parts.extend(tags)
     elif isinstance(tags, str): parts.extend([x.strip() for x in tags.split(",") if x.strip()])
-    # options / variants
     for opt in (p.get("options") or []):
         if isinstance(opt, dict):
             if opt.get("name"): parts.append(opt["name"])
@@ -449,10 +469,15 @@ def build_text_body_html(p: dict) -> str:
             name = title_case(opt["name"]) if NORMALIZE_TITLECASE else opt["name"]
             specs.append((name, ", ".join([title_case(v) if NORMALIZE_TITLECASE else v for v in opt["values"]])))
 
+    # NEW — Story/Use case/Differentiators
+    story = f"{title} solves daily hassles with reliable build and clean design — ideal for commuting, travel, or gifting."
+    differentiators = "Better grip, scratch-resistant finish, and easy compatibility with popular models."
+
     body = []
     body.append(f"<div class='pdp-copy' style='line-height:1.6'>")
     body.append(f"  <h2 style='margin:0 0 .5rem 0'>{title}</h2>")
     body.append(f"  <p><strong>{vendor}</strong> — {benefit_en} / {benefit_kr}</p>")
+    body.append(f"  <p>{story}</p>")
 
     if bullets:
         body.append("  <h3>Key Features</h3>")
@@ -460,6 +485,9 @@ def build_text_body_html(p: dict) -> str:
         for b in bullets:
             body.append(f"    <li>{b}</li>")
         body.append("  </ul>")
+
+    body.append("  <h3>Pros & Cons</h3>")
+    body.append("  <p><strong>Pros:</strong> Durable, easy to use, modern look.<br><strong>Cons:</strong> Check device/size/color before ordering.</p>")
 
     if specs:
         body.append("  <h3>Specs</h3>")
@@ -471,7 +499,7 @@ def build_text_body_html(p: dict) -> str:
             body.append("    </tr>")
         body.append("  </table>")
 
-    body.append("  <p style='margin-top:.75rem'>Carefully selected for everyday use. Enjoy dependable quality and friendly support.</p>")
+    body.append(f"  <p style='margin-top:.75rem'>Differentiators: {differentiators}</p>")
     body.append(f"  <p><em>Tip:</em> Add to cart now — limited stock! <strong>{CTA_PHRASE}</strong>.</p>")
 
     if BODY_INCLUDE_GALLERY and (p.get('images') or []):
@@ -616,7 +644,7 @@ def register():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
-# Keyword Map (cached)
+# Keyword Map (cached) + Intent tags
 # ─────────────────────────────────────────────────────────────
 _kw_cache = {"built_at": None, "params": None, "unigrams": [], "bigrams": [], "scanned": 0}
 
@@ -654,7 +682,14 @@ def _build_keyword_map(limit: int, min_len: int, include_bigrams: bool, scope: s
         if include_bigrams:
             bis = [b for b in bigrams(toks) if not any(w in STOPWORDS for w in b.split()) and not re.fullmatch(r"[\d\-\s]+", b)]
             bi.update(bis)
-    return {"unigrams": uni.most_common(limit), "bigrams": bi.most_common(limit) if include_bigrams else [], "scanned": scanned}
+    # attach naive intent tags to top items
+    uni_top = uni.most_common(limit)
+    bi_top  = bi.most_common(limit) if include_bigrams else []
+    def tag_intent(kw:str)->str:
+        return classify_intent_from_text(kw)
+    uni_tagged = [(k,c,tag_intent(k)) for k,c in uni_top]
+    bi_tagged  = [(k,c,tag_intent(k)) for k,c in bi_top]
+    return {"unigrams": uni_tagged, "bigrams": bi_tagged, "scanned": scanned}
 
 def _get_keyword_map(limit: int, min_len: int, include_bigrams: bool, scope: str="all", force: bool=False) -> Dict[str,Any]:
     if (not force) and _cache_valid(KEYWORD_CACHE_TTL_MIN):
@@ -693,17 +728,17 @@ def seo_keywords_run():
         try:
             import csv
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f); w.writerow(["keyword","count","type"])
-                for k,c in data["unigrams"]: w.writerow([k,c,"unigram"])
-                for k,c in (data["bigrams"] or []): w.writerow([k,c,"bigram"])
+                w = csv.writer(f); w.writerow(["keyword","count","type","intent"])
+                for k,c,i in data["unigrams"]: w.writerow([k,c,"unigram",i])
+                for k,c,i in (data["bigrams"] or []): w.writerow([k,c,"bigram",i])
         except Exception as e:
             csv_path = f"save_failed: {e}"
 
     return jsonify({
         "ok": True, "elapsed_sec": elapsed, "products_scanned": data["scanned"],
         "params": {"limit":limit,"min_len":minlen,"include_bigrams":include,"scope":scope,"save_csv":savecsv},
-        "unigrams": [{"keyword":k,"count":c} for k,c in data["unigrams"]],
-        "bigrams":  [{"keyword":k,"count":c} for k,c in (data["bigrams"] or [])],
+        "unigrams": [{"keyword":k,"count":c,"intent":i} for k,c,i in data["unigrams"]],
+        "bigrams":  [{"keyword":k,"count":c,"intent":i} for k,c,i in (data["bigrams"] or [])],
         "csv_path": csv_path
     })
 
@@ -762,8 +797,12 @@ def inject_related_links(body_html: str, related: List[dict]) -> str:
     ])
     return (body_html or "") + "\n\n" + block
 
+def count_internal_links(body_html: str) -> int:
+    if not body_html: return 0
+    return len(re.findall(r'href="/products/[^"]+"', body_html))
+
 # ─────────────────────────────────────────────────────────────
-# SEO routines (keyword-weighted + long-tail bias + internal links)
+# SEO routines (keyword-weighted + intent + seasonal)
 # ─────────────────────────────────────────────────────────────
 def _ensure_list(v):
     return v if isinstance(v, list) else ([v] if v else [])
@@ -775,13 +814,18 @@ def _score_kw(kw: str, title: str, body: str, tags: List[str], boost_set: set) -
     if re.search(kw_re, body):  s += 1.0
     if any(kw in (t or "").lower() for t in tags): s += 1.5
     if kw in boost_set: s *= 1.5
-    # NEW: long-tail length bonus
-    if " " in kw: s *= 1.25
+    if " " in kw: s *= 1.25  # long-tail bonus
     if len(kw) >= 14: s *= 1.1
     return s
 
 def _compose_title(primary: str, benefit: str, cta: str) -> str:
-    title = f"{primary} | {benefit}"
+    seasonal = ""
+    for w in SEASONAL_WORDS:
+        # 간단한 길이 제약 하에서만 추가
+        if len(primary) + len(" | ") + len(benefit) + len(" – ") + len(cta) + len(" · ") + len(w) <= TITLE_MAX_LEN:
+            seasonal = f" · {w}"
+            break
+    title = f"{primary} | {benefit}{seasonal}"
     if len(title) + 3 + len(cta) <= TITLE_MAX_LEN:
         title = f"{title} – {cta}"
     return (title[:TITLE_MAX_LEN]).rstrip(" -|·,")
@@ -797,7 +841,7 @@ def _compose_desc(keywords: List[str], base_body: str, cta: str) -> str:
         desc = f"{base_desc}. {cta}."
     else:
         desc = f"Curated picks for everyday use. {cta}."
-    return (desc[:DESC_MAX_LEN]).rstrip(" .,")
+    return (desc[:DESC_MAX_LEN]).rstrip(" .,")  # 160자 안전
 
 def ensure_alt_suggestions(p: Dict[str,Any]) -> List[str]:
     suggestions = []
@@ -826,14 +870,12 @@ def seo_optimize():
                           include_bigrams=KEYWORD_INCLUDE_BIGRAMS,
                           scope="all",
                           force=force_kw)
-    top_unigrams = [k for k,_ in km["unigrams"][:kw_top_n]]
-    top_bigrams  = [k for k,_ in (km["bigrams"] or [])[:kw_top_n]]
+    top_unigrams = [k for k,_,_ in km["unigrams"][:kw_top_n]]
+    top_bigrams  = [k for k,_,_ in (km["bigrams"] or [])[:kw_top_n]]
     boost_set    = set(top_unigrams + top_bigrams)
 
     prods = shopify_get_products(limit=max(limit, 50))
     targets = prods[:limit] if not rotate else prods[:limit]
-
-    # preload for related
     all_candidates = shopify_get_all_products(max_items=600) if inject_rel else []
 
     changed, errors = [], []
@@ -843,16 +885,21 @@ def seo_optimize():
         pid = p.get("id")
         gid = product_gid(pid)
         try:
-            title_raw = (p.get("title") or "").lower()
-            body_raw  = strip_html(p.get("body_html") or "").lower()
+            title_raw = (p.get("title") or "")
+            body_raw  = strip_html(p.get("body_html") or "")
             tags_list = p.get("tags") if isinstance(p.get("tags"), list) else \
                         ([x.strip() for x in (p.get("tags") or "").split(",")] if isinstance(p.get("tags"), str) else [])
 
-            scored_bi  = sorted([(kw, _score_kw(kw, title_raw, body_raw, tags_list, boost_set)) for kw in top_bigrams], key=lambda x: x[1], reverse=True)
-            scored_uni = sorted([(kw, _score_kw(kw, title_raw, body_raw, tags_list, boost_set)) for kw in top_unigrams], key=lambda x: x[1], reverse=True)
+            # Intent: title + body + tags 합성 후 분류
+            intent_input = " ".join([title_raw, body_raw, " ".join(tags_list)])
+            intent = classify_intent_from_text(intent_input)
+
+            # score keywords
+            title_l = title_raw.lower(); body_l = body_raw.lower()
+            scored_bi  = sorted([(kw, _score_kw(kw, title_l, body_l, tags_list, boost_set)) for kw in top_bigrams], key=lambda x: x[1], reverse=True)
+            scored_uni = sorted([(kw, _score_kw(kw, title_l, body_l, tags_list, boost_set)) for kw in top_unigrams], key=lambda x: x[1], reverse=True)
 
             chosen: List[str] = []
-            # prefer long-tail (bigrams) first
             for kw,sc in scored_bi:
                 if sc <= 0: continue
                 chosen.append(kw)
@@ -865,27 +912,35 @@ def seo_optimize():
                         if len(chosen) >= 5: break
 
             primary = (chosen[0] if chosen else (p.get("title","").split(" ",1)[0] or "Best Picks"))
-            meta_title = _compose_title(primary=primary, benefit=benefit, cta=CTA_PHRASE)
-            meta_desc  = _compose_desc(keywords=chosen, base_body=strip_html(p.get("body_html") or ""), cta=CTA_PHRASE)
+
+            # Intent에 따른 미세 조정(타이틀/디스크립션 어조)
+            benefit_intent = {
+                "informational": "Quick Tips · Honest Reviews",
+                "commercial":    "Top Picks · Expert Compare",
+                "transactional": benefit,
+                "unknown":       benefit
+            }.get(intent, benefit)
+
+            meta_title = _compose_title(primary=primary, benefit=benefit_intent, cta=CTA_PHRASE)
+            meta_desc  = _compose_desc(keywords=chosen, base_body=body_raw, cta=CTA_PHRASE)
 
             existing_title = p.get("metafields_global_title_tag")
             existing_desc  = p.get("metafields_global_description_tag")
             def ok_len(s, mx): return s and (15 <= len(s.strip()) <= mx)
 
-            # optional Related Picks injection (idempotent)
+            # Related Picks injection (idempotent)
             new_body = None
             if inject_rel and RELATED_LINKS_MAX > 0:
                 rel = find_related_products(p, all_candidates, RELATED_LINKS_MAX)
-                if rel:
-                    if RELATED_SECTION_MARKER not in (p.get("body_html") or ""):
-                        new_body = inject_related_links(p.get("body_html") or "", rel)
+                if rel and RELATED_SECTION_MARKER not in (p.get("body_html") or ""):
+                    new_body = inject_related_links(p.get("body_html") or "", rel)
 
-            # If SEO ok & no body change, skip unless force
+            # Skip if SEO ok and no body update unless force
             if (not force) and ok_len(existing_title, TITLE_MAX_LEN) and ok_len(existing_desc, DESC_MAX_LEN) and (new_body is None):
-                changed.append({"id": pid, "handle": p.get("handle"), "skipped_reason": "existing_seo_ok"})
+                changed.append({"id": pid, "handle": p.get("handle"), "skipped_reason": "existing_seo_ok", "intent": intent})
                 continue
 
-            # 👉 GQL 우선: descriptionHtml 로 본문 갱신 (필요 시 REST로 폴백)
+            # Update via GraphQL (fallback REST)
             if USE_GRAPHQL:
                 res = shopify_update_seo_graphql(gid, meta_title, meta_desc, body_html=new_body)
                 if not res.get("ok", True):
@@ -899,8 +954,10 @@ def seo_optimize():
                 "metaTitle": meta_title,
                 "metaDesc": meta_desc,
                 "keywords_used": chosen[:5],
+                "intent": intent,
                 "altSuggestions": ensure_alt_suggestions(p),
                 "body_updated": bool(new_body is not None),
+                "internal_link_count": count_internal_links(new_body if new_body is not None else (p.get("body_html") or "")),
                 "result": res
             })
         except Exception as e:
@@ -928,7 +985,7 @@ def run_seo_alias():
     return seo_optimize()
 
 # ─────────────────────────────────────────────────────────────
-# Blog Auto-Post (review / compare)
+# Blog Auto-Post (review / compare) + share snippets
 # ─────────────────────────────────────────────────────────────
 def _get_blog_id_by_handle(handle: str) -> Optional[str]:
     q = {
@@ -971,27 +1028,42 @@ def _article_create(blog_id: str, title: str, html: str, tags: List[str]) -> Dic
     return {"ok": True, "article": (data or {}).get("article")}
 
 def _blog_template(topic: str, products: List[dict], post_type: str, keywords: List[str]) -> Tuple[str,str]:
-    # title
     n = len(products)
     if post_type == "compare" and n >= 2:
         title = f"{products[0]['title']} vs {products[1]['title']} — Which {topic} is Best?"
     else:
         title = f"Top {n} {topic} in 2025 — Reviews & Buying Guide"
 
-    # body
     intro = f"<p>Looking for the best {topic}? Here’s our curated list with pros & cons, based on real features and compatibility.</p>"
     body = [f"<h2>{title}</h2>", intro]
 
+    # Ensure at least 3 internal links
+    link_count = 0
     for i, p in enumerate(products, 1):
         purl = f"/products/{p['handle']}"
         body.append(f"<h3>{i}. {p['title']}</h3>")
         body.append(f"<p><strong>Pros:</strong> Stylish, durable, easy to use.<br><strong>Cons:</strong> Check sizes/colors before you buy.</p>")
         body.append(f"<p><a href='{purl}'>Check {p['title']} &rarr;</a></p>")
+        link_count += 1
+    while link_count < 3 and products:
+        p = random.choice(products)
+        purl = f"/products/{p['handle']}"
+        body.append(f"<p><a href='{purl}'>Explore {p['title']} &rarr;</a></p>")
+        link_count += 1
 
     outro = "<p>All items are curated by Jeff’s Favorite Picks. Limited stock — grab yours today!</p>"
     kw = f"<p>Popular keywords: {', '.join(keywords[:5])}</p>" if keywords else ""
     html = "\n".join(body + [outro, kw])
     return title, html
+
+def _share_snippets(article_title: str, article_url: str, products: List[dict]) -> Dict[str,str]:
+    picks = ", ".join([p.get("title","") for p in products[:3] if p.get("title")])
+    return {
+        "pinterest": f"{article_title}\n{picks}\n{article_url}\n#phone #accessories #shopping #review",
+        "medium":    f"{article_title}\n\nWe compared: {picks}.\nRead more: {article_url}",
+        "reddit":    f"[Review] {article_title} — picks: {picks}\n{article_url}",
+        "quora":     f"{article_title}: What to consider when buying? See our breakdown → {article_url}"
+    }
 
 @app.post("/blog/auto-post")
 @require_auth
@@ -1005,269 +1077,324 @@ def blog_auto_post():
     pick_n = int(body.get("pick_n") or 5)
     tags   = body.get("tags") or [topic, "auto", "review" if post_type=="review" else "compare"]
 
-    # choose products
     allp = shopify_get_all_products(max_items=500)
     if not allp: return jsonify({"ok": False, "error": "no products"}), 400
     random.shuffle(allp)
-    products = allp[:max(2, min(8, pick_n))]
 
-    # keywords for highlight
-    km = _get_keyword_map(limit=80, min_len=KEYWORD_MIN_LEN, include_bigrams=True, scope="all", force=False)
-    kws = [k for k,_ in (km["bigrams"] or [])][:10] + [k for k,_ in km["unigrams"]][:10]
+    # pick products for this post
+    picks = allp[:pick_n] if len(allp) >= pick_n else allp
+    if not picks:
+        return jsonify({"ok": False, "error": "no picks"}), 400
 
-    title, html = _blog_template(topic, products, post_type, kws)
+    # keywords for snippet tail
+    km = _get_keyword_map(limit=KEYWORD_LIMIT_DEFAULT,
+                          min_len=KEYWORD_MIN_LEN,
+                          include_bigrams=KEYWORD_INCLUDE_BIGRAMS,
+                          scope="all",
+                          force=False)
+    top_kw = [k for k,_,_ in km["unigrams"][:10]]
+
+    # build HTML
+    title, html = _blog_template(topic, picks, post_type, top_kw)
+
+    # find blog id and publish
     blog_id = _get_blog_id_by_handle(BLOG_HANDLE)
     if not blog_id:
         return jsonify({"ok": False, "error": f"blog handle '{BLOG_HANDLE}' not found"}), 400
 
-    res = _article_create(blog_id, title, html, tags)
-    return jsonify({"ok": True, "topic": topic, "type": post_type, "article": res})
+    created = _article_create(blog_id, title, html, tags)
+    if not created.get("ok"):
+        return jsonify({"ok": False, "error": "article_create_failed", "details": created}), 500
+
+    article = created["article"]
+    a_url = article.get("onlineStoreUrl") or f"/blogs/{BLOG_HANDLE}/{article.get('handle')}"
+    snippets = _share_snippets(title, a_url, picks)
+
+    return jsonify({
+        "ok": True,
+        "article": {
+            "id": article.get("id"),
+            "title": article.get("title"),
+            "handle": article.get("handle"),
+            "url": a_url
+        },
+        "snippets": snippets,
+        "picks_count": len(picks),
+        "topic": topic,
+        "type": post_type
+    })
 
 # ─────────────────────────────────────────────────────────────
-# Email (SendGrid)
+# Sitemap (products-only) + Robots
 # ─────────────────────────────────────────────────────────────
-def send_email(subject: str, html: str, text: Optional[str]=None) -> Dict[str,Any]:
-    if not ENABLE_EMAIL:
-        log.info("Email disabled; subject=%s", subject)
-        return {"ok": False, "reason": "email disabled"}
-    if not SENDGRID_API_KEY or not EMAIL_TO:
-        log.warning("Missing SENDGRID_API_KEY or EMAIL_TO; email skipped")
-        return {"ok": False, "reason": "missing sendgrid or recipients"}
-    payload = {
-        "personalizations": [{"to": [{"email": e} for e in EMAIL_TO]}],
-        "from": {"email": EMAIL_FROM, "name": "Automation"},
-        "subject": subject,
-        "content": [
-            {"type": "text/plain", "value": text or ""},
-            {"type": "text/html",  "value": html}
-        ]
-    }
-    try:
-        r = http("POST", "https://api.sendgrid.com/v3/mail/send",
-                 headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-                 json=payload)
-        return {"ok": r.status_code in (200, 202), "status": r.status_code}
-    except Exception as e:
-        log.exception("Email send failed")
-        return {"ok": False, "error": str(e)}
+def _abs_product_url(handle: str) -> str:
+    host = CANONICAL_DOMAIN or f"{SHOPIFY_STORE}.myshopify.com"
+    return f"https://{host}/products/{handle}"
 
-@app.get("/report/daily")
-@require_auth
-def report_daily():
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))  # KST
-    date_s = now.strftime("%Y-%m-%d, %H:%M KST")
-    subject = f"[Daily SEO Auto-Fix] JEFF’s Favorite Picks — {now.strftime('%Y-%m-%d')}"
-
-    en = f"""
-    <p>Hi Jeff team,</p>
-    <p>Here’s today’s daily Google SEO optimization report for <b>{CANONICAL_DOMAIN or SHOPIFY_STORE}</b> ({date_s}).</p>
-    <ul>
-      <li>GraphQL: <b>{'ON' if USE_GRAPHQL else 'OFF'}</b></li>
-      <li>Email notifications: <b>{'ON' if ENABLE_EMAIL else 'OFF'}</b></li>
-      <li>Bing sitemap ping: <b>{'ON' if ENABLE_BING_PING else 'OFF'}</b></li>
-      <li>GSC sitemap submit: <b>{'ON' if ENABLE_GSC_SITEMAP_SUBMIT else 'OFF'}</b></li>
-    </ul>
-    <p>Next actions: keep /run-seo on cron, ensure robots.txt has Sitemap, and manage sitemap in Search Console.</p>
-    <p>Best,<br/>Automation</p>
-    """
-
-    kr = f"""
-    <p>안녕하세요,</p>
-    <p><b>{CANONICAL_DOMAIN or SHOPIFY_STORE}</b>의 일일 Google SEO 최적화 리포트입니다 ({date_s}).</p>
-    <ul>
-      <li>GraphQL 사용: <b>{'예' if USE_GRAPHQL else '아니오'}</b></li>
-      <li>이메일 알림: <b>{'켜짐' if ENABLE_EMAIL else '꺼짐'}</b></li>
-      <li>Bing 핑: <b>{'켜짐' if ENABLE_BING_PING else '꺼짐'}</b></li>
-      <li>GSC 사이트맵 제출: <b>{'켜짐' if ENABLE_GSC_SITEMAP_SUBMIT else '꺼짐'}</b></li>
-    </ul>
-    <p>다음 조치: 크론으로 /run-seo 유지, robots.txt의 Sitemap 확인, Search Console에서 사이트맵 관리.</p>
-    <p>감사합니다.<br/>Automation</p>
-    """
-
-    html = f"""
-    <div style='font-family:system-ui,Segoe UI,Arial,sans-serif'>
-      <h3>Daily SEO Auto-Fix Report</h3>
-      {en}
-      <hr/>
-      {kr}
-    </div>
-    """
-    res = send_email(subject, html, text=("Daily report attached"))
-    return jsonify({"ok": True, "emailed": res, "subject": subject})
-
-# ─────────────────────────────────────────────────────────────
-# GSC Sitemap submit (optional)
-# ─────────────────────────────────────────────────────────────
-def gsc_submit_sitemap(sitemap_url: str) -> Dict[str,Any]:
-    if not ENABLE_GSC_SITEMAP_SUBMIT:
-        return {"ok": False, "reason": "disabled"}
-    try:
-        from googleapiclient.discovery import build  # type: ignore
-        from google.oauth2 import service_account    # type: ignore
-    except Exception as e:
-        log.warning("GSC libs unavailable: %s", e)
-        return {"ok": False, "reason": "google libs unavailable"}
-    try:
-        creds = None
-        if GOOGLE_SERVICE_JSON_B64:
-            data = base64.b64decode(GOOGLE_SERVICE_JSON_B64)
-            creds = service_account.Credentials.from_service_account_info(json.loads(data))
-        elif GOOGLE_SERVICE_JSON_PATH and pathlib.Path(GOOGLE_SERVICE_JSON_PATH).exists():
-            creds = service_account.Credentials.from_service_account_file(GOOGLE_SERVICE_JSON_PATH)
-        else:
-            return {"ok": False, "reason": "missing service account"}
-        service = build('searchconsole', 'v1', credentials=creds, cache_discovery=False)
-        res = service.sitemaps().submit(siteUrl=GSC_SITE_URL, feedpath=sitemap_url).execute()
-        return {"ok": True, "result": res}
-    except Exception as e:
-        log.exception("GSC submit failed")
-        return {"ok": False, "error": str(e)}
-
-@app.get("/gsc/sitemap/submit")
-@require_auth
-def gsc_submit():
-    sitemap = request.args.get("sitemap") or PRIMARY_SITEMAP
-    res = gsc_submit_sitemap(sitemap)
-    return jsonify(res)
-
-# ─────────────────────────────────────────────────────────────
-# Robots, Sitemap, Ping / IndexNow
-# ─────────────────────────────────────────────────────────────
-def _as_lastmod(iso_str: str) -> str:
-    if not iso_str:
-        return dt.datetime.utcnow().replace(microsecond=0).isoformat()+"Z"
-    try:
-        if iso_str.endswith("Z"): return iso_str
-        return iso_str.replace("+00:00", "Z")
-    except:
-        return dt.datetime.utcnow().replace(microsecond=0).isoformat()+"Z"
-
-def _canonical_product_url(handle: str) -> str:
-    if CANONICAL_DOMAIN:
-        return f"https://{CANONICAL_DOMAIN}/products/{handle}"
-    return f"https://{SHOPIFY_STORE}.myshopify.com/products/{handle}"
+def _xml_escape(s: str) -> str:
+    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;").replace("'","&apos;")
 
 @app.get("/sitemap-products.xml")
 def sitemap_products():
     try:
-        r = http("GET", f"{BASE_REST}/products.json", headers=HEADERS_REST,
-                 params={"limit": 250, "fields": "id,handle,updated_at,published_at,status,images"})
-        data = r.json()
-        nodes = []
-        for p in data.get("products", []):
-            if p.get("status") != "active" or not p.get("published_at"): continue
-            loc = _canonical_product_url(p["handle"])
-            lastmod = _as_lastmod(p.get("updated_at") or p.get("published_at"))
-            image_tag = ""
-            imgs = p.get("images") or []
-            if imgs and imgs[0].get("src"):
-                image_tag = f"\n    <image:image><image:loc>{imgs[0]['src']}</image:loc></image:image>"
-            nodes.append(f"\n  <url>\n    <loc>{loc}</loc>\n    <lastmod>{lastmod}</lastmod>{image_tag}\n  </url>")
-        body = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n'
-                '        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">\n'
-                f'{"".join(nodes)}\n'
-                '</urlset>')
+        prods = shopify_get_all_products(max_items=5000)
+        urls = []
+        now = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        for p in prods:
+            if not p.get("handle"): continue
+            loc = _abs_product_url(p["handle"])
+            urls.append(f"<url><loc>{_xml_escape(loc)}</loc><lastmod>{now}</lastmod><changefreq>weekly</changefreq><priority>0.7</priority></url>")
+        body = "\n".join([
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+            *urls,
+            "</urlset>"
+        ])
         return Response(body, mimetype="application/xml")
     except Exception as e:
-        return Response(f"<!-- sitemap error: {e} -->", mimetype="application/xml", status=500)
+        log.exception("sitemap-products failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.get("/robots.txt")
-def robots():
+def robots_txt():
+    host = CANONICAL_DOMAIN or f"{SHOPIFY_STORE}.myshopify.com"
     lines = [
         "User-agent: *",
         "Allow: /",
-        f"Sitemap: {PRIMARY_SITEMAP}" if PRIMARY_SITEMAP else "",
-        f"Sitemap: {PUBLIC_BASE}/sitemap-products.xml" if PUBLIC_BASE else "Sitemap: /sitemap-products.xml",
+        "",
+        f"Sitemap: https://{host}/sitemap.xml",
     ]
-    return Response("\n".join([l for l in lines if l]) + "\n", mimetype="text/plain")
+    # Also advertise this service sitemap for product-only (optional)
+    if PUBLIC_BASE:
+        lines.append(f"Sitemap: {PUBLIC_BASE}/sitemap-products.xml")
+    return Response("\n".join(lines) + "\n", mimetype="text/plain")
 
+# ─────────────────────────────────────────────────────────────
+# Bing ping (deprecated) + IndexNow submit + (Fallback) Google ping
+# ─────────────────────────────────────────────────────────────
 @app.get("/bing/ping")
-@require_auth
 def bing_ping():
-    return jsonify({
-        "ok": False,
-        "reason": "bing sitemap ping deprecated (HTTP 410)",
-        "action": "use /indexnow/submit instead"
-    }), 410
+    # Bing's sitemap ping endpoint is deprecated; keep 410 for clarity.
+    return Response("Bing sitemap ping is deprecated.\n", status=410, mimetype="text/plain")
+
+def _indexnow_submit(urls: List[str]) -> Dict[str, Any]:
+    if not INDEXNOW_KEY:
+        return {"ok": False, "error": "missing INDEXNOW_KEY"}
+    payload = {
+        "host": CANONICAL_DOMAIN or f"{SHOPIFY_STORE}.myshopify.com",
+        "key": INDEXNOW_KEY,
+        "keyLocation": INDEXNOW_KEY_URL or "",
+        "urlList": urls[:1000],
+    }
+    try:
+        r = http("POST", "https://api.indexnow.org/indexnow", json=payload, headers={"Content-Type":"application/json"})
+        return {"ok": r.status_code in (200,202), "status": r.status_code, "text": r.text[:500]}
+    except Exception as e:
+        log.exception("IndexNow submit failed")
+        return {"ok": False, "error": str(e)}
 
 @app.post("/indexnow/submit")
 @require_auth
 def indexnow_submit():
-    """
-    Body(JSON):
-    {
-      "urls": ["https://jeffsfavoritepicks.com/products/...", "..."],  # 선택
-      "use_sitemap": true                                             # 선택: sitemap도 함께 제출
-    }
-    """
-    key = INDEXNOW_KEY
-    key_url = INDEXNOW_KEY_URL
-    if not key or not key_url:
-        return jsonify({"ok": False, "error": "missing INDEXNOW_KEY / INDEXNOW_KEY_URL"}), 400
+    body = request.get_json(silent=True) or {}
+    urls = body.get("urls") or []
 
-    data = request.get_json(silent=True) or {}
-    urls = data.get("urls") or []
-    if data.get("use_sitemap") and PRIMARY_SITEMAP:
-        urls.append(PRIMARY_SITEMAP)
     if not urls:
-        return jsonify({"ok": False, "error": "no urls"}), 400
+        # Build URLs from current products as a convenience
+        prods = shopify_get_products(limit=250)
+        urls = [_abs_product_url(p["handle"]) for p in prods if p.get("handle")]
+
+    res = _indexnow_submit(urls)
+    return jsonify({"ok": res.get("ok", False), "result": res, "count": len(urls)}), (200 if res.get("ok") else 500)
+
+@app.post("/gsc/sitemap/submit")
+@require_auth
+def gsc_sitemap_submit():
+    """
+    NOTE:
+    - Google deprecated public ping endpoints. Proper submission requires OAuth user credentials
+      to call Search Console API (sitemaps.submit). As a fallback, we attempt legacy ping which
+      may be ignored by Google. This endpoint is best-effort only.
+    """
+    body = request.get_json(silent=True) or {}
+    sitemap_url = body.get("sitemap_url") or PRIMARY_SITEMAP
+    try:
+        r = http("GET", "https://www.google.com/ping", params={"sitemap": sitemap_url})
+        ok = r.status_code in (200, 202)
+        return jsonify({"ok": ok, "status": r.status_code, "used_fallback_ping": True, "sitemap_url": sitemap_url}), (200 if ok else 500)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "sitemap_url": sitemap_url}), 500
+
+# ─────────────────────────────────────────────────────────────
+# Email helper (SendGrid)
+# ─────────────────────────────────────────────────────────────
+def send_email(subject: str, html_content: str, to: Optional[List[str]] = None) -> Dict[str, Any]:
+    if not ENABLE_EMAIL:
+        return {"ok": False, "error": "email_disabled"}
+    if not SENDGRID_API_KEY:
+        return {"ok": False, "error": "missing SENDGRID_API_KEY"}
+    to_list = [t for t in (to or EMAIL_TO) if t]
+    if not to_list:
+        return {"ok": False, "error": "empty_email_to"}
 
     payload = {
-        "host": CANONICAL_DOMAIN or f"{SHOPIFY_STORE}.myshopify.com",
-        "key": key,
-        "keyLocation": key_url,
-        "urlList": urls
+        "personalizations": [{"to": [{"email": x} for x in to_list]}],
+        "from": {"email": EMAIL_FROM},
+        "subject": subject,
+        "content": [{"type": "text/html", "value": html_content}],
     }
-    r = http("POST", "https://api.indexnow.org/indexnow",
-             json=payload, headers={"Content-Type": "application/json"})
-    return jsonify({"ok": 200 <= r.status_code < 300, "status": r.status_code, "response": r.text[:500]})
+    try:
+        r = http("POST", "https://api.sendgrid.com/v3/mail/send",
+                 headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type":"application/json"},
+                 json=payload)
+        ok = r.status_code in (200, 202)
+        return {"ok": ok, "status": r.status_code}
+    except Exception as e:
+        log.exception("send_email failed")
+        return {"ok": False, "error": str(e)}
 
 # ─────────────────────────────────────────────────────────────
-# Misc convenience endpoints
+# Daily Report: orphan suspects + speed(WebP) checks + summary
 # ─────────────────────────────────────────────────────────────
-@app.get("/")
-def root():
-    base = request.host_url
-    return jsonify({
-        "ok": True,
-        "service": "unified-pro",
-        "health": f"{base}health",
-        "routes": f"{base}__routes?auth=***",
-        "run_seo": f"{base}run-seo?auth=***&limit=10&rotate=true",
-        "register_demo": f"{base}register?auth=***",
-        "blog_demo": f"{base}blog/auto-post?auth=*** (POST topic/type)",
-    })
+def _image_webp_ratio(p: dict) -> float:
+    imgs = p.get("images") or []
+    if not imgs: return 0.0
+    total, webp = 0, 0
+    for im in imgs:
+        src = (im.get("src") if isinstance(im, dict) else str(im)) or ""
+        if not src: continue
+        total += 1
+        # naive check by extension or query
+        if ".webp" in src.lower(): webp += 1
+    return (webp / total) if total > 0 else 0.0
 
-@app.get("/__routes")
+def _orphan_suspect(p: dict) -> bool:
+    return count_internal_links(p.get("body_html") or "") < ORPHAN_LINK_MIN
+
+def _report_html(summary: Dict[str, Any]) -> str:
+    # bilingual header as per user's preference
+    lines = []
+    lines.append("<div style='font-family:system-ui,Segoe UI,Arial'>")
+    lines.append("<h2>Daily SEO Report / 일일 SEO 점검 리포트</h2>")
+    lines.append(f"<p>Generated (UTC): {dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</p>")
+    # Summary table
+    lines.append("<h3>Summary / 요약</h3>")
+    lines.append("<ul>")
+    lines.append(f"<li>Products scanned: {summary['scanned']}</li>")
+    lines.append(f"<li>Orphan suspects: {len(summary['orphans'])}</li>")
+    lines.append(f"<li>Avg WebP ratio: {summary['avg_webp_ratio']:.2f}</li>")
+    lines.append(f"<li>Below WebP threshold (>{int(SPEED_WEBP_THRESHOLD*100)}% target): {len(summary['below_threshold'])}</li>")
+    lines.append("</ul>")
+
+    # Orphans
+    if summary["orphans"]:
+        lines.append("<h3>Orphaned-Page Suspects (내부 링크 부족)</h3>")
+        lines.append("<ol>")
+        for o in summary["orphans"][:50]:
+            url = _abs_product_url(o['handle'])
+            lines.append(f"<li><a href='{url}'>{o['title']}</a> — internal links: {o['internal_links']}</li>")
+        lines.append("</ol>")
+    else:
+        lines.append("<p>No orphan suspects. 🎉</p>")
+
+    # Below WebP
+    if summary["below_threshold"]:
+        lines.append("<h3>WebP Ratio Below Threshold (이미지 WebP 비율 낮음)</h3>")
+        lines.append("<ol>")
+        for b in summary["below_threshold"][:50]:
+            url = _abs_product_url(b['handle'])
+            pct = int(round(b['webp_ratio']*100))
+            lines.append(f"<li><a href='{url}'>{b['title']}</a> — WebP: {pct}%</li>")
+        lines.append("</ol>")
+    else:
+        lines.append("<p>All products meet WebP ratio target. ✅</p>")
+
+    # Tips
+    lines.append("<h3>Tips</h3>")
+    lines.append("<ul>")
+    lines.append("<li>Add 2–3 internal links (Related Picks) into low-link product pages.</li>")
+    lines.append("<li>Convert gallery images to WebP for faster LCP and better INP.</li>")
+    lines.append("<li>Keep meta title & description within length limits; include CTA.</li>")
+    lines.append("</ul>")
+    lines.append("</div>")
+    return "\n".join(lines)
+
+@app.get("/report/daily")
 @require_auth
+def daily_report():
+    try:
+        prods = shopify_get_all_products(max_items=1000)
+        scanned = len(prods)
+
+        orphans, below = [], []
+        webp_ratios = []
+
+        for p in prods:
+            il = count_internal_links(p.get("body_html") or "")
+            if il < ORPHAN_LINK_MIN:
+                orphans.append({"id": p.get("id"), "handle": p.get("handle"), "title": p.get("title"), "internal_links": il})
+            wr = _image_webp_ratio(p)
+            webp_ratios.append(wr)
+            if wr < SPEED_WEBP_THRESHOLD:
+                below.append({"id": p.get("id"), "handle": p.get("handle"), "title": p.get("title"), "webp_ratio": wr})
+
+        avg_webp = sum(webp_ratios)/len(webp_ratios) if webp_ratios else 0.0
+        summary = {
+            "scanned": scanned,
+            "orphans": orphans,
+            "below_threshold": below,
+            "avg_webp_ratio": avg_webp,
+            "webp_threshold": SPEED_WEBP_THRESHOLD
+        }
+        html = _report_html(summary)
+
+        email_status = send_email(
+            subject="Daily SEO Report — Orphans & WebP / 일일 SEO 리포트",
+            html_content=html
+        )
+
+        return jsonify({"ok": True, "summary": summary, "email": email_status})
+    except Exception as e:
+        log.exception("daily_report failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ─────────────────────────────────────────────────────────────
+# Diagnostics
+# ─────────────────────────────────────────────────────────────
+@app.get("/__routes")
 def list_routes():
-    routes = []
+    rules = []
     for r in app.url_map.iter_rules():
-        routes.append({"rule": str(r), "endpoint": r.endpoint, "methods": sorted(list(r.methods))})
-    return jsonify({"count": len(routes), "routes": routes})
+        if r.endpoint == 'static': continue
+        rules.append({
+            "endpoint": r.endpoint,
+            "methods": sorted([m for m in r.methods if m in {"GET","POST","PUT","DELETE","PATCH"}]),
+            "rule": str(r)
+        })
+    rules.sort(key=lambda x: x["rule"])
+    return jsonify({"ok": True, "routes": rules})
 
 @app.get("/health")
 def health():
+    return jsonify({"ok": True, "time_utc": dt.datetime.utcnow().isoformat() + "Z"})
+
+@app.get("/")
+def root():
     return jsonify({
         "ok": True,
+        "name": "Unified Pro (Register + SEO + Keywords + Blog + Sitemap + Email + IndexNow + Reports)",
+        "version": "2025-10-02",
+        "public_base": PUBLIC_BASE,
         "store": SHOPIFY_STORE,
-        "v": API_VERSION,
-        "use_graphql": USE_GRAPHQL,
-        "email_enabled": ENABLE_EMAIL,
-        "bing_ping": ENABLE_BING_PING,
-        "gsc_sitemap_submit": ENABLE_GSC_SITEMAP_SUBMIT,
-        "blog_auto_post": BLOG_AUTO_POST,
-        "ts": dt.datetime.utcnow().isoformat()+"Z"
+        "canonical_domain": CANONICAL_DOMAIN,
+        "endpoints": [r.rule for r in app.url_map.iter_rules() if r.endpoint != "static"]
     })
 
 # ─────────────────────────────────────────────────────────────
-# Entrypoint
+# Main
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    log.info("Starting server on :%s", port)
+    port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)
-
 
 
