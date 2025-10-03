@@ -221,9 +221,9 @@ if _missing:
 MAX_PRODUCTS_SCAN = int(os.getenv("MAX_PRODUCTS_SCAN", "6000"))
 MAX_ENDPOINT_LIMIT = int(os.getenv("MAX_ENDPOINT_LIMIT", "250"))
 def clamp(n, lo, hi):
-    try: n=int(n)
-    except: n=lo
-    return max(lo, min(hi, n)))
+    try: n = int(n)
+    except: n = lo
+    return max(lo, min(hi, n))  # --- PATCH FIX: clamp
 # --- PATCH END ---
 
 # ─────────────────────────────────────────────────────────────
@@ -303,7 +303,7 @@ HEADERS_GQL  = {"X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type": "applicat
 
 @retry()
 def shopify_get_products(limit: int=SEO_LIMIT) -> List[Dict[str,Any]]:
-    r = http("GET", f"{BASE_REST}/products.json", headers=HEADERS_REST, params={"limit": min(250, limit)})
+    r = http("GET", f"{BASE_REST}/products.json", headers=HEADERS_REST, params={"limit": min(250, int(limit))})
     return r.json().get("products", [])
 
 # --- PATCH START: GraphQL pagination for all products ---
