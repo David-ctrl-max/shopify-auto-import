@@ -1,6 +1,6 @@
 # main.py — Unified Pro (Register + Auto Body HTML + SEO + Keyword-Weighted Optimize + Sitemap + Email + IndexNow + Blog Auto-Post + Intent + Orphan/Speed Report + Share Snippets)
 # =========================================================================================================
-# ✅ What’s included (2025-10-02 + quick-win patches)
+# ✅ What’s included (2025-10-03 full patched)
 # - /register (GET/POST)          : real Shopify product creation (images/options/variants/inventory)
 #   ↳ Auto body_html(text-first), ALT auto, TitleCase normalize, Story/Pros&Cons/Differentiators
 # - /seo/optimize                 : keyword-weighted SEO meta (title/desc) + Long-tail bias + Intent aware
@@ -93,7 +93,7 @@
 # SEASONAL_WORDS="2025 New, Free Shipping, Limited Stock"
 # =========================================================================================================
 
-import os, sys, json, time, base64, pathlib, logging, re, random
+import os, sys, json, time, base64, pathlib, logging, re, random, hashlib
 from typing import Any, Dict, List, Optional, Tuple
 import datetime as dt
 from collections import Counter
@@ -136,6 +136,50 @@ def env_str(key: str, default=""):
 def env_int(key: str, default: int) -> int:
     try: return int(os.getenv(key, default))
     except: return default
+
+# --- NEW: GSC JSON Base64 → File materialization (always-on) ---
+def ensure_gsc_json():
+    """
+    Decode GOOGLE_SERVICE_JSON_B64 into /opt/render/project/src/gsc-service.json (default),
+    or into GOOGLE_SERVICE_JSON_PATH if provided.
+    """
+    b64 = (os.getenv("GOOGLE_SERVICE_JSON_B64") or "").strip()
+    target_path = os.getenv("GOOGLE_SERVICE_JSON_PATH",
+                            "/opt/render/project/src/gsc-service.json")
+
+    if not b64:
+        log.info("[GSC] GOOGLE_SERVICE_JSON_B64 not set")
+        return
+
+    path = pathlib.Path(target_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # If already exists and looks non-empty, keep it
+    if path.exists() and path.stat().st_size > 1024:
+        log.info(f"[GSC] JSON already present at {target_path}")
+        return
+
+    # fix base64 padding if needed
+    pad = len(b64) % 4
+    if pad:
+        b64 += "=" * (4 - pad)
+
+    try:
+        data = base64.b64decode(b64)
+        path.write_bytes(data)
+        # log key fingerprint (no secrets)
+        sha1 = hashlib.sha1(data).hexdigest()[:8]
+        try:
+            svc = json.loads(data)
+            email = svc.get("client_email", "unknown")
+        except Exception:
+            email = "unknown"
+        log.info(f"[GSC] JSON written → {target_path} (sha1={sha1}, client_email={email})")
+    except Exception as e:
+        log.exception("[GSC] Failed to decode/write service JSON: %s", e)
+
+# Run at startup
+ensure_gsc_json()
 
 IMPORT_AUTH_TOKEN = env_str("IMPORT_AUTH_TOKEN", "jeffshopsecure")
 SHOPIFY_STORE    = env_str("SHOPIFY_STORE", "").strip()
@@ -1374,7 +1418,7 @@ def gsc_sitemap_submit():
         return jsonify({"ok": False, "error": str(e), "sitemap_url": sitemap_url}), 500
 
 # ─────────────────────────────────────────────────────────────
-# Email helper (SendGrid) + GSC service JSON materialize
+# Email helper (SendGrid) + GSC service JSON materialize (legacy guard)
 # ─────────────────────────────────────────────────────────────
 def send_email(subject: str, html_content: str, to: Optional[List[str]] = None) -> Dict[str, Any]:
     if not ENABLE_EMAIL:
@@ -1401,7 +1445,7 @@ def send_email(subject: str, html_content: str, to: Optional[List[str]] = None) 
         log.exception("send_email failed")
         return {"ok": False, "error": str(e)}
 
-# --- PATCH START: decode Google service account JSON (if enabled) ---
+# --- PATCH START: decode Google service account JSON (legacy conditional; keep for compatibility) ---
 def _ensure_service_json():
     if ENABLE_GSC_SITEMAP_SUBMIT and GOOGLE_SERVICE_JSON_B64 and GOOGLE_SERVICE_JSON_PATH:
         try:
@@ -1555,6 +1599,5 @@ def root():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)
-
 
 
