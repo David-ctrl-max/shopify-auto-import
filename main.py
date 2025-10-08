@@ -1562,6 +1562,73 @@ def daily_report():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ─────────────────────────────────────────────────────────────
+# --- Shopify 연결 진단 라우트 ---
+# ─────────────────────────────────────────────────────────────
+@app.get("/health/shopify")
+def health_shopify():
+    """
+    간단한 Shopify Admin API 연결 확인:
+    - Env 우선순위
+      * DOMAIN : SHOPIFY_STORE_DOMAIN || (SHOPIFY_STORE + ".myshopify.com")
+      * TOKEN  : SHOPIFY_API_TOKEN || SHOPIFY_ADMIN_TOKEN
+      * API_V  : SHOPIFY_API_VERSION || API_VERSION || "2025-07"
+    - 인증: ?auth= / X-Auth / Authorization: Bearer <ADMIN_AUTH or IMPORT_AUTH_TOKEN>
+    """
+    # 내부 진단용 별도 토큰(없으면 IMPORT_AUTH_TOKEN 사용)
+    admin_auth = os.getenv("ADMIN_AUTH") or IMPORT_AUTH_TOKEN
+    if admin_auth:
+        qs = request.args.get("auth")
+        bearer = (request.headers.get("Authorization") or "").strip()
+        xauth = request.headers.get("X-Auth")
+        token_hdr = None
+        if bearer.lower().startswith("bearer "):
+            token_hdr = bearer.split(" ",1)[1].strip()
+        provided = qs or xauth or token_hdr
+        if provided != admin_auth:
+            return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    store = os.getenv("SHOPIFY_STORE_DOMAIN") or (
+        (os.getenv("SHOPIFY_STORE") or "").strip() + ".myshopify.com"
+    )
+    store = store.replace("https://","").replace("http://","").strip("/")
+    token = os.getenv("SHOPIFY_API_TOKEN") or os.getenv("SHOPIFY_ADMIN_TOKEN")
+    api_v = os.getenv("SHOPIFY_API_VERSION") or os.getenv("API_VERSION") or "2025-07"
+
+    if not store or not token:
+        return jsonify({
+            "ok": False,
+            "error": "missing_env",
+            "need": {
+                "SHOPIFY_STORE_DOMAIN": bool(store),
+                "SHOPIFY_API_TOKEN": bool(token),
+                "SHOPIFY_API_VERSION": api_v
+            }
+        }), 500
+
+    base = f"https://{store}/admin/api/{api_v}"
+    try:
+        r = http("GET", f"{base}/shop.json",
+                 headers={
+                   "X-Shopify-Access-Token": token,
+                   "Accept": "application/json"
+                 })
+        body = None
+        try:
+            body = r.json()
+        except Exception:
+            body = (r.text or "")[:500]
+        return jsonify({
+            "ok": r.ok,
+            "status": r.status_code,
+            "endpoint": f"{base}/shop.json",
+            "domain": store,
+            "api_version": api_v,
+            "body": body
+        }), (200 if r.ok else r.status_code)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ─────────────────────────────────────────────────────────────
 # Diagnostics
 # ─────────────────────────────────────────────────────────────
 @app.get("/__routes")
