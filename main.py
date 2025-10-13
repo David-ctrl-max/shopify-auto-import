@@ -47,11 +47,11 @@ except Exception as e:
 # ─────────────────────────────────────────────────────────────
 # Env helpers
 # ─────────────────────────────────────────────────────────────
-def env_bool(k, d=False): 
-    v=os.getenv(k); 
-    return d if v is None else str(v).lower() in ("1","true","yes","on","y")
+def env_bool(k, d=False):
+    v = os.getenv(k)
+    return d if v is None else str(v).lower() in ("1", "true", "yes", "on", "y")
 def env_str(k, d=""): return os.getenv(k, d)
-def env_int(k, d): 
+def env_int(k, d):
     try: return int(os.getenv(k, d))
     except: return d
 
@@ -66,12 +66,12 @@ def ensure_gsc_json():
     p = pathlib.Path(target); p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists() and p.stat().st_size > 1024:
         log.info("[GSC] JSON already present at %s", target); return
-    pad=len(b64)%4
-    if pad: b64+="="*(4-pad)
-    data=base64.b64decode(b64); p.write_bytes(data)
-    sha1=hashlib.sha1(data).hexdigest()[:8]
-    try: email=json.loads(data).get("client_email","unknown")
-    except: email="unknown"
+    pad = len(b64) % 4
+    if pad: b64 += "=" * (4 - pad)
+    data = base64.b64decode(b64); p.write_bytes(data)
+    sha1 = hashlib.sha1(data).hexdigest()[:8]
+    try: email = json.loads(data).get("client_email", "unknown")
+    except: email = "unknown"
     log.info("[GSC] JSON written → %s (sha1=%s, client_email=%s)", target, sha1, email)
 
 ensure_gsc_json()
@@ -111,11 +111,11 @@ GSC_SITE_URL        = env_str("GSC_SITE_URL", "https://jeffsfavoritepicks.com")
 GOOGLE_SERVICE_JSON_PATH = env_str("GOOGLE_SERVICE_JSON_PATH", "/opt/render/project/src/gsc-service.json")
 
 # 🔹 NEW: GSC Trend envs
-SEO_TREND_FROM_GSC      = env_bool("SEO_TREND_FROM_GSC", True)
-SEO_TREND_LOOKBACK_DAYS = env_int("SEO_TREND_LOOKBACK_DAYS", 28)
-SEO_TREND_TOP_N         = env_int("SEO_TREND_TOP_N", 50)
+SEO_TREND_FROM_GSC        = env_bool("SEO_TREND_FROM_GSC", True)
+SEO_TREND_LOOKBACK_DAYS   = env_int("SEO_TREND_LOOKBACK_DAYS", 28)
+SEO_TREND_TOP_N           = env_int("SEO_TREND_TOP_N", 50)
 SEO_TREND_MIN_IMPRESSIONS = env_int("SEO_TREND_MIN_IMPRESSIONS", 30)
-SEO_TREND_BLACKLIST     = [x.strip().lower() for x in env_str("SEO_TREND_BLACKLIST","").split(",") if x.strip()]
+SEO_TREND_BLACKLIST       = [x.strip().lower() for x in env_str("SEO_TREND_BLACKLIST","").split(",") if x.strip()]
 
 # Keyword map config
 KEYWORD_MIN_LEN         = env_int("KEYWORD_MIN_LEN", 3)
@@ -162,8 +162,8 @@ SEASONAL_WORDS         = [w.strip() for w in env_str("SEASONAL_WORDS","2025 New,
 MAX_PRODUCTS_SCAN   = int(os.getenv("MAX_PRODUCTS_SCAN", "6000"))
 MAX_ENDPOINT_LIMIT  = int(os.getenv("MAX_ENDPOINT_LIMIT", "250"))
 def clamp(n, lo, hi):
-    try: n=int(n)
-    except: n=lo
+    try: n = int(n)
+    except: n = lo
     return max(lo, min(hi, n))
 
 # ─────────────────────────────────────────────────────────────
@@ -195,22 +195,22 @@ def retry(max_attempts=3, base_delay=0.6, factor=2.0, allowed=(429,500,502,503,5
     def deco(fn):
         @wraps(fn)
         def inner(*a, **kw):
-            delay=base_delay
+            delay = base_delay
             for i in range(1, max_attempts+1):
                 try: return fn(*a, **kw)
                 except requests.HTTPError as e:
-                    st=e.response.status_code if e.response is not None else None
+                    st = e.response.status_code if e.response is not None else None
                     if i>=max_attempts or st not in allowed: raise
                 except Exception:
                     if i>=max_attempts: raise
-                time.sleep(delay); delay*=factor
+                time.sleep(delay); delay *= factor
         return inner
     return deco
 
 @retry()
 def http(method, url, **kw):
-    r=requests.request(method, url, timeout=30, **kw)
-    if r.status_code>=400:
+    r = requests.request(method, url, timeout=30, **kw)
+    if r.status_code >= 400:
         log.error("HTTP %s %s -> %s", method, url, r.status_code)
         r.raise_for_status()
     return r
@@ -225,11 +225,11 @@ HEADERS_GQL  = {"X-Shopify-Access-Token": ADMIN_TOKEN, "Content-Type":"applicati
 
 @retry()
 def shopify_get_products(limit=SEO_LIMIT):
-    r=http("GET", f"{BASE_REST}/products.json", headers=HEADERS_REST, params={"limit":min(250,int(limit))})
+    r = http("GET", f"{BASE_REST}/products.json", headers=HEADERS_REST, params={"limit":min(250,int(limit))})
     return r.json().get("products", [])
 
 def _gql_products_page(after=None, page_size=250)->dict:
-    q={
+    q = {
         "query":"""
         query($first:Int!, $after:String){
           products(first:$first, after:$after, sortKey:UPDATED_AT){
@@ -245,12 +245,12 @@ def _gql_products_page(after=None, page_size=250)->dict:
         }""",
         "variables":{"first":min(250,page_size),"after":after}
     }
-    r=http("POST", BASE_GRAPHQL, headers=HEADERS_GQL, json=q)
+    r = http("POST", BASE_GRAPHQL, headers=HEADERS_GQL, json=q)
     return r.json()["data"]["products"]
 
 def _edge_to_restish(n:dict)->dict:
-    imgs=[{"src":e["node"]["url"],"alt":e["node"]["altText"] or ""} for e in (n.get("images",{}).get("edges") or [])]
-    vars=[{"title":v["node"]["title"],"sku":v["node"]["sku"],"price":v["node"]["price"]} for v in (n.get("variants",{}).get("edges") or [])]
+    imgs = [{"src":e["node"]["url"],"alt":e["node"]["altText"] or ""} for e in (n.get("images",{}).get("edges") or [])]
+    vars = [{"title":v["node"]["title"],"sku":v["node"]["sku"],"price":v["node"]["price"]} for v in (n.get("variants",{}).get("edges") or [])]
     return {
         "id": int(n["id"].split("/")[-1]),
         "title": n.get("title"), "handle": n.get("handle"),
@@ -262,29 +262,29 @@ def _edge_to_restish(n:dict)->dict:
 def shopify_get_all_products(max_items=2000)->List[dict]:
     items, after, fetched = [], None, 0
     while True:
-        data=_gql_products_page(after=after, page_size=250)
+        data = _gql_products_page(after=after, page_size=250)
         for e in data["edges"]:
             items.append(_edge_to_restish(e["node"]))
-            fetched+=1
-            if fetched>=min(MAX_PRODUCTS_SCAN,max_items): return items
+            fetched += 1
+            if fetched >= min(MAX_PRODUCTS_SCAN,max_items): return items
         if not data["pageInfo"]["hasNextPage"]: break
-        after=data["pageInfo"]["endCursor"]
+        after = data["pageInfo"]["endCursor"]
     return items
 
 @retry()
 def shopify_update_seo_rest(pid:int, meta_title:Optional[str], meta_desc:Optional[str], body_html:Optional[str]=None):
     if DRY_RUN: return {"dry_run":True}
-    payload={"product":{"id":pid}}
-    if meta_title is not None: payload["product"]["metafields_global_title_tag"]=meta_title
-    if meta_desc  is not None: payload["product"]["metafields_global_description_tag"]=meta_desc
-    if body_html is not None:  payload["product"]["body_html"]=body_html
-    r=http("PUT", f"{BASE_REST}/products/{pid}.json", headers=HEADERS_REST, json=payload)
+    payload = {"product":{"id":pid}}
+    if meta_title is not None: payload["product"]["metafields_global_title_tag"] = meta_title
+    if meta_desc  is not None: payload["product"]["metafields_global_description_tag"] = meta_desc
+    if body_html is not None:  payload["product"]["body_html"] = body_html
+    r = http("PUT", f"{BASE_REST}/products/{pid}.json", headers=HEADERS_REST, json=payload)
     return r.json()
 
 @retry()
 def shopify_update_seo_graphql(gid:str, seo_title:Optional[str], seo_desc:Optional[str], body_html:Optional[str]=None):
     if DRY_RUN: return {"dry_run":True}
-    m={"query":"""
+    m = {"query":"""
         mutation productUpdate($input: ProductInput!){
           productUpdate(input:$input){
             product{ id title descriptionHtml seo{title description} }
@@ -296,9 +296,9 @@ def shopify_update_seo_graphql(gid:str, seo_title:Optional[str], seo_desc:Option
            **({"seo":{"title":seo_title,"description":seo_desc}} if (seo_title or seo_desc) else {}),
            **({"descriptionHtml":body_html} if body_html is not None else {})
        }}}
-    r=http("POST", BASE_GRAPHQL, headers=HEADERS_GQL, json=m)
-    data=r.json().get("data",{}).get("productUpdate")
-    errs=(data or {}).get("userErrors") or []
+    r = http("POST", BASE_GRAPHQL, headers=HEADERS_GQL, json=m)
+    data = r.json().get("data",{}).get("productUpdate")
+    errs = (data or {}).get("userErrors") or []
     if not data or errs: return {"ok":False,"errors":errs or ["no productUpdate data"]}
     return {"ok":True,"data":data}
 
@@ -307,7 +307,7 @@ def product_gid(pid:int)->str: return f"gid://shopify/Product/{pid}"
 # ─────────────────────────────────────────────────────────────
 # Utils (tokenize/intent/template)
 # ─────────────────────────────────────────────────────────────
-STOPWORDS={"the","and","for","you","your","with","from","this","that","are","our","has","have","was","were","will","can","all",
+STOPWORDS = {"the","and","for","you","your","with","from","this","that","are","our","has","have","was","were","will","can","all",
 "any","into","more","most","such","other","than","then","them","they","their","there","over","after","before","not","but",
 "about","also","how","what","when","where","which","while","who","whom","why","a","an","in","on","of","to","by","as","at",
 "is","it","be","or","we","i","me","my","mine","yours","its","it’s","it's","new","pcs","pc","set","size","color","colors",
@@ -316,7 +316,7 @@ STOPWORDS={"the","and","for","you","your","with","from","this","that","are","our
 "gen","magnetic","magsafe","wireless","charger","charging","usb","type-c","cable","cables","adapter","adapters","band",
 "bands","watch","watches","airpods","earbuds"}
 
-INTENT_LEX={
+INTENT_LEX = {
  "informational":["how","what","guide","tips","tutorial","review","size guide","faq","benefits","pros","cons"],
  "commercial":["best","top","compare","vs","versus","brands","recommend","recommendation","deal","discount"],
  "transactional":["buy","price","coupon","free shipping","order","checkout","shop","sale"]
@@ -324,30 +324,30 @@ INTENT_LEX={
 
 def classify_intent_from_text(text:str)->str:
     if not INTENT_CLASSIFY: return "unknown"
-    t=(text or "").lower(); score={"informational":0,"commercial":0,"transactional":0}
+    t = (text or "").lower(); score={"informational":0,"commercial":0,"transactional":0}
     for intent, keys in INTENT_LEX.items():
         for k in keys:
-            if re.search(rf"\b{re.escape(k)}\b", t): score[intent]+=1
-    intent=max(score, key=score.get)
-    return intent if score[intent]>0 else "unknown"
+            if re.search(rf"\b{re.escape(k)}\b", t): score[intent] += 1
+    intent = max(score, key=score.get)
+    return intent if score[intent] > 0 else "unknown"
 
 def strip_html(s:str)->str:
-    s=re.sub(r"<[^>]+>"," ", s or ""); return re.sub(r"\s+"," ", s).strip()
+    s = re.sub(r"<[^>]+>"," ", s or ""); return re.sub(r"\s+"," ", s).strip()
 
 def title_case(s:str)->str:
     if not s: return s
-    words=re.split(r"(\s+|-|/)", str(s))
-    def tc(w): 
+    words = re.split(r"(\s+|-|/)", str(s))
+    def tc(w):
         if not w or re.fullmatch(r"\W+", w): return w
         return w[0].upper()+w[1:].lower() if w.lower() not in {"for","and","or","to","of","a","an","the","in","on","at","by"} else w.lower()
     return "".join(tc(w) for w in words)
 
 def tokenize(text:str, min_len:int)->List[str]:
-    t=text.lower(); t=re.sub(r"[_/|]"," ", t)
+    t = text.lower(); t = re.sub(r"[_/|]"," ", t)
     return re.findall(r"[a-z0-9\+\-]{%d,}"%max(1,min_len), t)
 
 def filter_stopwords(tokens:List[str], min_len:int)->List[str]:
-    out=[]
+    out = []
     for w in tokens:
         if len(w)<min_len: continue
         if w in STOPWORDS: continue
@@ -375,8 +375,8 @@ _PDP_TMPL = Template("""
 """.strip())
 
 def best_keywords_from_product(p:dict, top_n:int=8)->List[str]:
-    parts=[p.get("title") or "", strip_html(p.get("body_html") or "")]
-    tags=p.get("tags")
+    parts = [p.get("title") or "", strip_html(p.get("body_html") or "")]
+    tags = p.get("tags")
     if isinstance(tags,list): parts.extend(tags)
     elif isinstance(tags,str): parts.extend([x.strip() for x in tags.split(",") if x.strip()])
     for opt in (p.get("options") or []):
@@ -387,28 +387,28 @@ def best_keywords_from_product(p:dict, top_n:int=8)->List[str]:
         if isinstance(v,dict):
             if v.get("title"): parts.append(v["title"])
             if v.get("sku"): parts.append(str(v["sku"]))
-    toks=filter_stopwords(tokenize(" ".join(parts), KEYWORD_MIN_LEN), KEYWORD_MIN_LEN)
-    uni=Counter(toks)
+    toks = filter_stopwords(tokenize(" ".join(parts), KEYWORD_MIN_LEN), KEYWORD_MIN_LEN)
+    uni = Counter(toks)
     return [k for k,_ in uni.most_common(top_n)]
 
 def make_feature_list_from_keywords(kws:List[str])->List[str]:
-    feats=[kw.replace("-"," ").title() for kw in kws][:8]
-    base=["Lightweight","Durable Materials","Easy to Use","Fits Most Devices","Gift-Ready Packaging"]
+    feats = [kw.replace("-"," ").title() for kw in kws][:8]
+    base = ["Lightweight","Durable Materials","Easy to Use","Fits Most Devices","Gift-Ready Packaging"]
     for b in base:
         if len(feats)>=8: break
         if b.lower() not in " ".join(feats).lower(): feats.append(b)
     return feats[:8]
 
 def build_text_body_html(p:dict)->str:
-    title=p.get("title") or "Product"
-    vendor=p.get("vendor") or BRAND_NAME
-    kws=best_keywords_from_product(p, top_n=10)
-    bullets=make_feature_list_from_keywords(kws)
-    specs=[]
+    title = p.get("title") or "Product"
+    vendor = p.get("vendor") or BRAND_NAME
+    kws = best_keywords_from_product(p, top_n=10)
+    bullets = make_feature_list_from_keywords(kws)
+    specs = []
     for opt in (p.get("options") or []):
         if isinstance(opt,dict) and opt.get("name") and opt.get("values"):
-            name=title_case(opt["name"]) if NORMALIZE_TITLECASE else opt["name"]
-            vals=", ".join([title_case(v) if NORMALIZE_TITLECASE else v for v in opt["values"]])
+            name = title_case(opt["name"]) if NORMALIZE_TITLECASE else opt["name"]
+            vals = ", ".join([title_case(v) if NORMALIZE_TITLECASE else v for v in opt["values"]])
             specs.append((name, vals))
     return _PDP_TMPL.render(
         title=title, vendor=vendor, benefit_en=BENEFIT_LINE_EN, benefit_kr=BENEFIT_LINE_KR,
@@ -426,15 +426,15 @@ def ensure_titlecase_in_product(p:dict)->dict:
         if isinstance(opt,dict):
             if opt.get("name"): opt["name"]=title_case(opt["name"])
             if isinstance(opt.get("values"),list): opt["values"]=[title_case(v) for v in opt["values"]]
-    tags=p.get("tags")
+    tags = p.get("tags")
     if isinstance(tags,list): p["tags"]=[title_case(t) for t in tags]
     elif isinstance(tags,str): p["tags"]=",".join([title_case(x.strip()) for x in tags.split(",") if x.strip()])
     return p
 
 def inject_auto_alt_to_images(p:dict)->dict:
     if not ALT_AUTO_GENERATE: return p
-    title=p.get("title") or "Product"
-    imgs=p.get("images") or []; new=[]
+    title = p.get("title") or "Product"
+    imgs = p.get("images") or []; new=[]
     for i,img in enumerate(imgs):
         if isinstance(img,str): new.append({"src":img,"alt":f"{title} — image {i+1}"})
         elif isinstance(img,dict):
@@ -446,31 +446,31 @@ def inject_auto_alt_to_images(p:dict)->dict:
 # Product Registration (demo or batch)
 # ─────────────────────────────────────────────────────────────
 def _slugify(title:str)->str:
-    slug=re.sub(r"[^a-z0-9\- ]","",(title or "").lower()).strip()
-    slug=re.sub(r"\s+","-",slug); slug=re.sub(r"-{2,}","-",slug).strip("-")
+    slug = re.sub(r"[^a-z0-9\- ]","",(title or "").lower()).strip()
+    slug = re.sub(r"\s+","-",slug); slug = re.sub(r"-{2,}","-",slug).strip("-")
     return slug or f"prod-{int(time.time())}"
 
 def _normalize_product_payload(p:dict)->dict:
-    p=ensure_titlecase_in_product(p); p=inject_auto_alt_to_images(p)
-    title=p.get("title") or "Untitled Product"
-    body=p.get("body_html") or p.get("body") or ""
+    p = ensure_titlecase_in_product(p); p = inject_auto_alt_to_images(p)
+    title = p.get("title") or "Untitled Product"
+    body = p.get("body_html") or p.get("body") or ""
     if should_generate_body(body):
         try:
-            body=build_text_body_html({"title":title,"vendor":p.get("vendor") or BRAND_NAME,
+            body = build_text_body_html({"title":title,"vendor":p.get("vendor") or BRAND_NAME,
                                        "options":p.get("options") or [],"variants":p.get("variants") or [],
                                        "images":p.get("images") or [],"tags":p.get("tags")})
         except Exception:
-            body=f"<p>{title} — {BENEFIT_LINE_EN} / {BENEFIT_LINE_KR}. {CTA_PHRASE}.</p>"
-    tags=p.get("tags") or []
-    tags_str=",".join([str(t) for t in tags]) if isinstance(tags,list) else str(tags)
-    handle=p.get("handle") or _slugify(title)[:80]
-    images=[]
+            body = f"<p>{title} — {BENEFIT_LINE_EN} / {BENEFIT_LINE_KR}. {CTA_PHRASE}.</p>"
+    tags = p.get("tags") or []
+    tags_str = ",".join([str(t) for t in tags]) if isinstance(tags,list) else str(tags)
+    handle = p.get("handle") or _slugify(title)[:80]
+    images = []
     for img in (p.get("images") or []):
         if isinstance(img,dict) and img.get("src"):
             images.append({"src":img["src"], **({"alt":img["alt"]} if img.get("alt") else {})})
         elif isinstance(img,str):
             images.append({"src":img})
-    variants=[]
+    variants = []
     for v in (p.get("variants") or []):
         vr={"sku":str(v.get("sku") or ""), "price":str(v.get("price") or "0"),
             "option1":v.get("option1") or "Default", "option2":v.get("option2"), "option3":v.get("option3"),
@@ -479,11 +479,11 @@ def _normalize_product_payload(p:dict)->dict:
             try: vr["inventory_quantity"]=int(v.get("inventory_quantity"))
             except: vr["inventory_quantity"]=0
         variants.append(vr)
-    options=[]
+    options = []
     for opt in (p.get("options") or []):
         if isinstance(opt,dict) and opt.get("name"):
             options.append({"name":opt["name"], "values":opt.get("values") or []})
-    payload={"product":{
+    payload = {"product":{
         "title":title, "body_html":body, "vendor":p.get("vendor") or BRAND_NAME,
         "product_type":p.get("product_type") or "General", "tags":tags_str, "handle":handle, "images":images
     }}
@@ -494,8 +494,8 @@ def _normalize_product_payload(p:dict)->dict:
 @retry()
 def _create_product(payload:dict)->dict:
     if DRY_RUN: return {"dry_run":True, "id":None}
-    r=http("POST", f"{BASE_REST}/products.json", headers=HEADERS_REST, json=payload)
-    prod=r.json().get("product",{})
+    r = http("POST", f"{BASE_REST}/products.json", headers=HEADERS_REST, json=payload)
+    prod = r.json().get("product",{})
     return {"id":prod.get("id"), "title":prod.get("title"), "handle":prod.get("handle"),
             "admin_url": f"https://admin.shopify.com/store/{SHOPIFY_STORE}/products/{prod.get('id')}" if prod.get("id") else None}
 
@@ -504,10 +504,10 @@ def _create_product(payload:dict)->dict:
 def register():
     try:
         if request.method=="POST":
-            body=request.get_json(silent=True) or {}
-            products_input=body.get("products") or []
+            body = request.get_json(silent=True) or {}
+            products_input = body.get("products") or []
             if not products_input: return jsonify({"ok":False,"error":"empty_products"}), 400
-            created, errors=[], []
+            created, errors = [], []
             for p in products_input:
                 try: created.append(_create_product(_normalize_product_payload(p)))
                 except Exception as e:
@@ -518,7 +518,7 @@ def register():
               "tags":["MagSafe","iPhone","Clear"],"images":[{"src":"https://picsum.photos/seed/magsafe15/800/800"}],
               "variants":[{"sku":f"MAGSAFE-15-CLR-{int(time.time())}","price":"19.99","inventory_quantity":25,"option1":"Clear"}],
               "options":[{"name":"Color","values":["Clear"]}]}
-        res=_create_product(_normalize_product_payload(demo))
+        res = _create_product(_normalize_product_payload(demo))
         return jsonify({"ok":True,"created":[res],"demo":True})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}), 500
@@ -532,11 +532,11 @@ def _cache_valid(ttl_min:int)->bool:
     return _kw_cache["built_at"] is not None and (time.time()-_kw_cache["built_at"])<=ttl_min*60
 
 def _build_keyword_map(limit:int, min_len:int, include_bigrams:bool, scope:str="all")->Dict[str,Any]:
-    products=shopify_get_all_products(max_items=2000)
-    uni, bi, scanned=Counter(), Counter(), 0
+    products = shopify_get_all_products(max_items=2000)
+    uni, bi, scanned = Counter(), Counter(), 0
     for p in products:
-        scanned+=1
-        parts=[]
+        scanned += 1
+        parts = []
         if scope in ("all","titles"):
             parts.append(p.get("title") or "")
             for v in (p.get("variants") or []):
@@ -550,22 +550,22 @@ def _build_keyword_map(limit:int, min_len:int, include_bigrams:bool, scope:str="
         if scope in ("all","descriptions"):
             parts.append(strip_html(p.get("body_html") or ""))
         if scope in ("all","tags"):
-            tags=p.get("tags") or []
+            tags = p.get("tags") or []
             if isinstance(tags,list): parts.extend(tags)
             elif isinstance(tags,str): parts.extend([x.strip() for x in tags.split(",") if x.strip()])
         if scope in ("all",):
             for img in (p.get("images") or []):
                 if isinstance(img,dict):
-                    alt=(img.get("alt") or "").strip()
+                    alt = (img.get("alt") or "").strip()
                     if alt: parts.append(alt)
-        text=" ".join([x for x in parts if x])
-        toks=filter_stopwords(tokenize(text, min_len), min_len)
+        text = " ".join([x for x in parts if x])
+        toks = filter_stopwords(tokenize(text, min_len), min_len)
         uni.update(toks)
         if include_bigrams:
-            bis=[b for b in bigrams(toks) if not any(w in STOPWORDS for w in b.split()) and not re.fullmatch(r"[\d\-\s]+", b)]
+            bis = [b for b in bigrams(toks) if not any(w in STOPWORDS for w in b.split()) and not re.fullmatch(r"[\d\-\s]+", b)]
             bi.update(bis)
-    uni_top=uni.most_common(limit)
-    bi_top =bi.most_common(limit) if include_bigrams else []
+    uni_top = uni.most_common(limit)
+    bi_top  = bi.most_common(limit) if include_bigrams else []
     def tag(kw:str)->str: return classify_intent_from_text(kw)
     return {"unigrams":[(k,c,tag(k)) for k,c in uni_top],
             "bigrams":[(k,c,tag(k)) for k,c in bi_top],
@@ -577,7 +577,7 @@ def _get_keyword_map(limit:int, min_len:int, include_bigrams:bool, scope:str="al
                 "bigrams": _kw_cache["bigrams"][:limit] if include_bigrams else [],
                 "scanned": _kw_cache["scanned"], "cached":True,
                 "age_sec": time.time()-_kw_cache["built_at"], "params":_kw_cache["params"]}
-    data=_build_keyword_map(limit, min_len, include_bigrams, scope)
+    data = _build_keyword_map(limit, min_len, include_bigrams, scope)
     _kw_cache.update({"built_at":time.time(),"params":{"limit":limit,"min_len":min_len,"include_bigrams":include_bigrams,"scope":scope},
                       "unigrams":data["unigrams"],"bigrams":data["bigrams"],"scanned":data["scanned"]})
     return {**data,"cached":False,"age_sec":0,"params":_kw_cache["params"]}
@@ -587,15 +587,15 @@ def _get_keyword_map(limit:int, min_len:int, include_bigrams:bool, scope:str="al
 def seo_keywords_run():
     limit  = clamp(int(request.args.get("limit", KEYWORD_LIMIT_DEFAULT)), 10, 2000)
     minlen = clamp(int(request.args.get("min_len", KEYWORD_MIN_LEN)), 2, 10)
-    include=str(request.args.get("include_bigrams", str(KEYWORD_INCLUDE_BIGRAMS))).lower() in ("1","true","yes","on","y")
-    scope  =(request.args.get("scope","all") or "all").lower()
-    savecsv=str(request.args.get("save_csv", str(KEYWORD_SAVE_CSV))).lower() in ("1","true","yes","on","y")
-    t0=time.time()
-    data=_get_keyword_map(limit, minlen, include, scope, force=True)
-    elapsed=round(time.time()-t0,3)
-    csv_path=None
+    include = str(request.args.get("include_bigrams", str(KEYWORD_INCLUDE_BIGRAMS))).lower() in ("1","true","yes","on","y")
+    scope   = (request.args.get("scope","all") or "all").lower()
+    savecsv = str(request.args.get("save_csv", str(KEYWORD_SAVE_CSV))).lower() in ("1","true","yes","on","y")
+    t0 = time.time()
+    data = _get_keyword_map(limit, minlen, include, scope, force=True)
+    elapsed = round(time.time()-t0,3)
+    csv_path = None
     if savecsv:
-        today=dt.datetime.utcnow().strftime("%Y%m%d"); csv_path=f"/mnt/data/keyword_map_{today}.csv"
+        today = dt.datetime.utcnow().strftime("%Y%m%d"); csv_path = f"/mnt/data/keyword_map_{today}.csv"
         try:
             import csv
             with open(csv_path,"w",newline="",encoding="utf-8") as f:
@@ -603,7 +603,7 @@ def seo_keywords_run():
                 for k,c,i in data["unigrams"]: w.writerow([k,c,"unigram",i])
                 for k,c,i in (data["bigrams"] or []): w.writerow([k,c,"bigram",i])
         except Exception as e:
-            csv_path=f"save_failed: {e}"
+            csv_path = f"save_failed: {e}"
     return jsonify({
         "ok":True, "elapsed_sec":elapsed, "products_scanned":data["scanned"],
         "params":{"limit":limit,"min_len":minlen,"include_bigrams":include,"scope":scope,"save_csv":savecsv},
@@ -615,7 +615,7 @@ def seo_keywords_run():
 @app.get("/seo/keywords/cache")
 @require_auth
 def seo_keywords_cache():
-    age=None if _kw_cache["built_at"] is None else round(time.time()-_kw_cache["built_at"],2)
+    age = None if _kw_cache["built_at"] is None else round(time.time()-_kw_cache["built_at"],2)
     return jsonify({"ok":True,"built_at_epoch":_kw_cache["built_at"],"age_sec":age,"params":_kw_cache["params"],
                     "unigrams_count":len(_kw_cache["unigrams"]),"bigrams_count":len(_kw_cache["bigrams"]),
                     "products_scanned":_kw_cache["scanned"]})
@@ -624,7 +624,10 @@ def seo_keywords_cache():
 # NEW: GSC Trend fetcher + endpoint
 # ─────────────────────────────────────────────────────────────
 def _gsc_service():
-    creds=service_account.Credentials.from_service_account_file(GOOGLE_SERVICE_JSON_PATH, scopes=["https://www.googleapis.com/auth/webmasters.readonly"])
+    creds = service_account.Credentials.from_service_account_file(
+        GOOGLE_SERVICE_JSON_PATH,
+        scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
+    )
     return build("searchconsole","v1", credentials=creds, cache_discovery=False)
 
 def fetch_gsc_trends() -> List[Dict[str,Any]]:
@@ -632,24 +635,19 @@ def fetch_gsc_trends() -> List[Dict[str,Any]]:
     if not SEO_TREND_FROM_GSC:
         return []
     try:
-        svc=_gsc_service()
-        end=(dt.datetime.utcnow()-dt.timedelta(days=2)).date()  # 약간의 지연 버퍼
-        start=end - dt.timedelta(days=max(7, SEO_TREND_LOOKBACK_DAYS))
-        body={
-            "startDate": start.isoformat(),
-            "endDate": end.isoformat(),
-            "dimensions":["query"],
-            "rowLimit": SEO_TREND_TOP_N,
-        }
-        res=svc.searchanalytics().query(siteUrl=GSC_SITE_URL, body=body).execute()
-        rows=res.get("rows", [])
-        out=[]
+        svc = _gsc_service()
+        end = (dt.datetime.utcnow()-dt.timedelta(days=2)).date()
+        start = end - dt.timedelta(days=max(7, SEO_TREND_LOOKBACK_DAYS))
+        body = {"startDate": start.isoformat(),"endDate": end.isoformat(),"dimensions":["query"],"rowLimit": SEO_TREND_TOP_N}
+        res = svc.searchanalytics().query(siteUrl=GSC_SITE_URL, body=body).execute()
+        rows = res.get("rows", [])
+        out = []
         for r in rows:
-            q=(r.get("keys",[None])[0] or "").strip()
+            q = (r.get("keys",[None])[0] or "").strip()
             if not q: continue
-            ql=q.lower()
+            ql = q.lower()
             if SEO_TREND_BLACKLIST and any(b in ql for b in SEO_TREND_BLACKLIST): continue
-            imp=int(r.get("impressions",0))
+            imp = int(r.get("impressions",0))
             if imp < SEO_TREND_MIN_IMPRESSIONS: continue
             clicks=int(r.get("clicks",0)); ctr=float(r.get("ctr",0)); pos=float(r.get("position",0))
             out.append({"query":q, "clicks":clicks, "impressions":imp, "ctr":ctr, "position":pos})
@@ -662,7 +660,7 @@ def fetch_gsc_trends() -> List[Dict[str,Any]]:
 @app.get("/seo/trends/gsc")
 @require_auth
 def seo_trends_gsc():
-    data=fetch_gsc_trends()
+    data = fetch_gsc_trends()
     return jsonify({"ok":True,"count":len(data),"site":GSC_SITE_URL,"lookback_days":SEO_TREND_LOOKBACK_DAYS,
                     "min_impressions":SEO_TREND_MIN_IMPRESSIONS,"blacklist":SEO_TREND_BLACKLIST,"rows":data})
 
@@ -670,32 +668,32 @@ def seo_trends_gsc():
 # Internal links helpers
 # ─────────────────────────────────────────────────────────────
 def _extract_tokens_for_match(p:dict)->set:
-    parts=[p.get("title") or "", strip_html(p.get("body_html") or "")]
-    tags=p.get("tags") or []
+    parts = [p.get("title") or "", strip_html(p.get("body_html") or "")]
+    tags = p.get("tags") or []
     if isinstance(tags,list): parts.extend(tags)
     elif isinstance(tags,str): parts.extend([x.strip() for x in tags.split(",") if x.strip()])
-    toks=set(filter_stopwords(tokenize(" ".join(parts), KEYWORD_MIN_LEN), KEYWORD_MIN_LEN))
+    toks = set(filter_stopwords(tokenize(" ".join(parts), KEYWORD_MIN_LEN), KEYWORD_MIN_LEN))
     return toks
 
 def find_related_products(target:dict, candidates:List[dict], k:int)->List[dict]:
-    tgt=_extract_tokens_for_match(target); scored=[]
+    tgt = _extract_tokens_for_match(target); scored=[]
     for c in candidates:
         if c.get("id")==target.get("id"): continue
-        cset=_extract_tokens_for_match(c); score=len(tgt & cset)
+        cset = _extract_tokens_for_match(c); score=len(tgt & cset)
         if score>0: scored.append((score,c))
     scored.sort(key=lambda x:x[0], reverse=True)
     return [c for _,c in scored[:max(0,k)]]
 
 def inject_related_links_bottom(body_html:str, related:List[dict])->str:
     if not related or RELATED_SECTION_MARKER in (body_html or ""): return body_html
-    lis=[f'<li><a href="/products/{rp.get("handle")}">{rp.get("title") or "View product"}</a></li>' for rp in related]
-    block="\n".join([RELATED_SECTION_MARKER,"<h3>Related Picks</h3>","<ul>",*lis,"</ul>"])
+    lis = [f'<li><a href="/products/{rp.get("handle")}">{rp.get("title") or "View product"}</a></li>' for rp in related]
+    block = "\n".join([RELATED_SECTION_MARKER,"<h3>Related Picks</h3>","<ul>",*lis,"</ul>"])
     return (body_html or "") + "\n\n" + block
 
 def inject_related_links_top(html:str, related:List[dict])->str:
     if not related or RELATED_TOP_MARKER in (html or ""): return html
-    picks=[f'<a href="/products/{rp.get("handle")}">{rp.get("title") or "View product"}</a>' for rp in related[:2]]
-    block=RELATED_TOP_MARKER + f'\n<p>Quick Picks: {" · ".join(picks)}</p>\n'
+    picks = [f'<a href="/products/{rp.get("handle")}">{rp.get("title") or "View product"}</a>' for rp in related[:2]]
+    block = RELATED_TOP_MARKER + f'\n<p>Quick Picks: {" · ".join(picks)}</p>\n'
     if "</p>" in (html or ""): return re.sub(r"(</p>)", r"\1\n"+block, html, count=1)
     return block + (html or "")
 
@@ -708,17 +706,17 @@ def count_internal_links(body_html:str)->int:
 def _ensure_list(v): return v if isinstance(v,list) else ([v] if v else [])
 
 def _score_kw(kw:str, title:str, body:str, tags:List[str], boost_set:set)->float:
-    s=0.0; kw_re=rf"\b{re.escape(kw)}\b"
-    if re.search(kw_re, title): s+=2.0
-    if re.search(kw_re, body):  s+=1.0
-    if any(kw in (t or "").lower() for t in tags): s+=1.5
-    if kw in boost_set: s*=1.5
-    if " " in kw: s*=1.25
-    if len(kw)>=14: s*=1.1
+    s = 0.0; kw_re = rf"\b{re.escape(kw)}\b"
+    if re.search(kw_re, title): s += 2.0
+    if re.search(kw_re, body):  s += 1.0
+    if any(kw in (t or "").lower() for t in tags): s += 1.5
+    if kw in boost_set: s *= 1.5
+    if " " in kw: s *= 1.25
+    if len(kw)>=14: s *= 1.1
     return s
 
 def _compose_title(primary:str, benefit:str, cta:str)->str:
-    seasonal=""
+    seasonal = ""
     for w in SEASONAL_WORDS:
         if len(primary)+len(" | ")+len(benefit)+len(" – ")+len(cta)+len(" · ")+len(w)<=TITLE_MAX_LEN:
             seasonal=f" · {w}"; break
@@ -727,8 +725,8 @@ def _compose_title(primary:str, benefit:str, cta:str)->str:
     return (title[:TITLE_MAX_LEN]).rstrip(" -|·,")
 
 def _compose_desc(keywords:List[str], base_body:str, cta:str)->str:
-    desc_kw=", ".join(keywords[:3]) if keywords else ""
-    base_desc=(base_body or "")[:120]
+    desc_kw = ", ".join(keywords[:3]) if keywords else ""
+    base_desc = (base_body or "")[:120]
     if desc_kw and base_desc: desc=f"{desc_kw} — {base_desc}. {cta}."
     elif desc_kw: desc=f"{desc_kw}. {cta}."
     elif base_desc: desc=f"{base_desc}. {cta}."
@@ -755,10 +753,10 @@ def seo_optimize():
     inject_rel = str(request.args.get("related_links", str(ALLOW_BODY_LINK_INJECTION))).lower() in ("1","true","yes","on","y")
 
     # 1) 기본 키워드 맵
-    km=_get_keyword_map(limit=max(kw_top_n, KEYWORD_LIMIT_DEFAULT),
-                        min_len=KEYWORD_MIN_LEN,
-                        include_bigrams=KEYWORD_INCLUDE_BIGRAMS,
-                        scope="all", force=force_kw)
+    km = _get_keyword_map(limit=max(kw_top_n, KEYWORD_LIMIT_DEFAULT),
+                          min_len=KEYWORD_MIN_LEN,
+                          include_bigrams=KEYWORD_INCLUDE_BIGRAMS,
+                          scope="all", force=force_kw)
     top_unigrams=[k for k,_,_ in km["unigrams"][:kw_top_n]]
     top_bigrams =[k for k,_,_ in (km["bigrams"] or [])[:kw_top_n]]
     boost_set=set(top_unigrams+top_bigrams)
@@ -766,33 +764,33 @@ def seo_optimize():
     # 2) GSC 트렌드 병합(부스팅 전용)
     trend_keywords=[]
     if SEO_TREND_FROM_GSC:
-        rows=fetch_gsc_trends()
-        trend_keywords=[r["query"].lower() for r in rows]
+        rows = fetch_gsc_trends()
+        trend_keywords = [r["query"].lower() for r in rows]
         boost_set |= set(trend_keywords)
 
-    prods=shopify_get_products(limit=max(limit,50))
-    targets=prods[:limit] if not rotate else prods[:limit]
-    all_candidates=shopify_get_all_products(max_items=600) if inject_rel else []
+    prods = shopify_get_products(limit=max(limit,50))
+    targets = prods[:limit] if not rotate else prods[:limit]
+    all_candidates = shopify_get_all_products(max_items=600) if inject_rel else []
 
-    changed, errors=[], []
-    default_benefit="Fast Shipping · Quality Picks"
+    changed, errors = [], []
+    default_benefit = "Fast Shipping · Quality Picks"
 
     for p in targets:
-        pid=p.get("id"); gid=product_gid(pid)
+        pid = p.get("id"); gid = product_gid(pid)
         try:
-            title_raw=p.get("title") or ""
-            body_html=p.get("body_html") or ""
-            body_raw=strip_html(body_html)
-            tags_list=p.get("tags") if isinstance(p.get("tags"),list) else \
-                      ([x.strip() for x in (p.get("tags") or "").split(",")] if isinstance(p.get("tags"),str) else [])
+            title_raw = p.get("title") or ""
+            body_html = p.get("body_html") or ""
+            body_raw  = strip_html(body_html)
+            tags_list = p.get("tags") if isinstance(p.get("tags"),list) else \
+                        ([x.strip() for x in (p.get("tags") or "").split(",")] if isinstance(p.get("tags"),str) else [])
 
             # intent
-            intent=classify_intent_from_text(" ".join([title_raw, body_raw, " ".join(tags_list)]))
+            intent = classify_intent_from_text(" ".join([title_raw, body_raw, " ".join(tags_list)]))
 
             # 스코어링
-            title_l=title_raw.lower(); body_l=body_raw.lower()
-            scored_bi =sorted([(kw,_score_kw(kw,title_l,body_l,tags_list,boost_set)) for kw in top_bigrams], key=lambda x:x[1], reverse=True)
-            scored_uni=sorted([(kw,_score_kw(kw,title_l,body_l,tags_list,boost_set)) for kw in top_unigrams], key=lambda x:x[1], reverse=True)
+            title_l = title_raw.lower(); body_l = body_raw.lower()
+            scored_bi  = sorted([(kw,_score_kw(kw,title_l,body_l,tags_list,boost_set)) for kw in top_bigrams], key=lambda x:x[1], reverse=True)
+            scored_uni = sorted([(kw,_score_kw(kw,title_l,body_l,tags_list,boost_set)) for kw in top_unigrams], key=lambda x:x[1], reverse=True)
 
             chosen=[]
             for kw,sc in scored_bi:
@@ -805,7 +803,7 @@ def seo_optimize():
                     if kw not in chosen:
                         chosen.append(kw)
                         if len(chosen)>=5: break
-            # 트렌드 키워드를 살짝 섞기(있다면 1~2개 우선 삽입)
+            # 트렌드 키워드 1~2개 프라이머리 쪽에 주입
             for tk in trend_keywords[:2]:
                 if tk not in chosen: chosen.insert(0, tk)
 
@@ -817,34 +815,34 @@ def seo_optimize():
                 "unknown": default_benefit
             }.get(intent, default_benefit)
 
-            meta_title=_compose_title(primary, benefit, CTA_PHRASE)
-            meta_desc =_compose_desc(chosen, body_raw, CTA_PHRASE)
+            meta_title = _compose_title(primary, benefit, CTA_PHRASE)
+            meta_desc  = _compose_desc(chosen, body_raw, CTA_PHRASE)
 
-            existing_title=p.get("metafields_global_title_tag")
-            existing_desc =p.get("metafields_global_description_tag")
+            existing_title = p.get("metafields_global_title_tag")
+            existing_desc  = p.get("metafields_global_description_tag")
             def ok_len(s,mx): return s and (15<=len(s.strip())<=mx)
 
             # 내부링크 주입
             new_body=None; updated_html=body_html
             if inject_rel and RELATED_LINKS_MAX>0:
-                rel=find_related_products(p, all_candidates, RELATED_LINKS_MAX)
+                rel = find_related_products(p, all_candidates, RELATED_LINKS_MAX)
                 if rel:
                     if RELATED_TOP_MARKER not in updated_html:
-                        updated_html=inject_related_links_top(updated_html, rel)
+                        updated_html = inject_related_links_top(updated_html, rel)
                     if RELATED_SECTION_MARKER not in updated_html:
-                        updated_html=inject_related_links_bottom(updated_html, rel)
-                    if updated_html!=body_html: new_body=updated_html
+                        updated_html = inject_related_links_bottom(updated_html, rel)
+                    if updated_html != body_html: new_body = updated_html
 
             if (not force) and ok_len(existing_title,TITLE_MAX_LEN) and ok_len(existing_desc,DESC_MAX_LEN) and (new_body is None):
                 changed.append({"id":pid,"handle":p.get("handle"),"skipped_reason":"existing_seo_ok","intent":intent})
                 continue
 
             if USE_GRAPHQL:
-                res=shopify_update_seo_graphql(gid, meta_title, meta_desc, body_html=new_body)
+                res = shopify_update_seo_graphql(gid, meta_title, meta_desc, body_html=new_body)
                 if not res.get("ok", True):
-                    res=shopify_update_seo_rest(pid, meta_title, meta_desc, body_html=new_body)
+                    res = shopify_update_seo_rest(pid, meta_title, meta_desc, body_html=new_body)
             else:
-                res=shopify_update_seo_rest(pid, meta_title, meta_desc, body_html=new_body)
+                res = shopify_update_seo_rest(pid, meta_title, meta_desc, body_html=new_body)
 
             changed.append({
                 "id":pid,"handle":p.get("handle"),
@@ -874,7 +872,7 @@ def seo_optimize():
 def run_seo_alias(): return seo_optimize()
 
 # ─────────────────────────────────────────────────────────────
-# Blog Auto-Post (요약: 동일 로직 / 축약 표기)
+# Blog Auto-Post
 # ─────────────────────────────────────────────────────────────
 def _get_blog_id_by_handle(handle:str)->Optional[str]:
     q={"query":"query($h:String!){ blogByHandle(handle:$h){ id title handle }}","variables":{"h":handle}}
@@ -931,7 +929,7 @@ def blog_auto_post():
     topic=body.get("topic") or BLOG_DEFAULT_TOPIC
     post_type=(body.get("type") or BLOG_POST_TYPE or "review").lower()
     pick_n=int(body.get("pick_n") or 5); tags=body.get("tags") or [topic,"auto","review" if post_type=="review" else "compare"]
-    allp=shopify_get_all_products(max_items=500); 
+    allp=shopify_get_all_products(max_items=500)
     if not allp: return jsonify({"ok":False,"error":"no products"}), 400
     random.shuffle(allp); picks=allp[:pick_n] if len(allp)>=pick_n else allp
     km=_get_keyword_map(limit=KEYWORD_LIMIT_DEFAULT, min_len=KEYWORD_MIN_LEN, include_bigrams=KEYWORD_INCLUDE_BIGRAMS, scope="all", force=False)
@@ -977,18 +975,24 @@ def sitemap_index():
 @app.get("/sitemap-products.xml")
 def sitemap_products():
     try:
-        prods=shopify_get_all_products(max_items=5000); urls=[]
+        prods = shopify_get_all_products(max_items=5000)
+        urls = []
         for p in prods:
-            h=p.get("handle"); if not h: continue
-            loc=_abs_product_url(h); lastmod=_to_rfc3339_utc(p.get("updated_at") or p.get("published_at"))
-            imgs=p.get("images") or []; img_xml=[]
+            h = p.get("handle")
+            if not h:
+                continue
+            loc = _abs_product_url(h)
+            lastmod = _to_rfc3339_utc(p.get("updated_at") or p.get("published_at"))
+            imgs = p.get("images") or []
+            img_xml = []
             for im in imgs[:6]:
-                src=im.get("src") if isinstance(im,dict) else (str(im) if im else "")
-                if src: img_xml.append(f"<image:image><image:loc>{_xml_escape(src)}</image:loc></image:image>")
+                src = im.get("src") if isinstance(im,dict) else (str(im) if im else "")
+                if src:
+                    img_xml.append(f"<image:image><image:loc>{_xml_escape(src)}</image:loc></image:image>")
             urls.append(f"<url><loc>{_xml_escape(loc)}</loc><lastmod>{lastmod}</lastmod><changefreq>weekly</changefreq><priority>0.7</priority>{''.join(img_xml)}</url>")
-        body="\n".join(['<?xml version="1.0" encoding="UTF-8"?>',
-                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
-                        *urls,"</urlset>"])
+        body = "\n".join(['<?xml version="1.0" encoding="UTF-8"?>',
+                          '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
+                          *urls,"</urlset>"])
         return Response(body, mimetype="application/xml")
     except Exception as e:
         log.exception("sitemap-products failed")
@@ -1043,7 +1047,7 @@ def gsc_sitemap_submit():
 # Daily Report (orphans + WebP)
 # ─────────────────────────────────────────────────────────────
 def _image_webp_ratio(p:dict)->float:
-    imgs=p.get("images") or []; 
+    imgs=p.get("images") or []
     if not imgs: return 0.0
     total=sum(1 for _ in imgs); webp=sum(1 for im in imgs if ".webp" in ((im.get("src") if isinstance(im,dict) else str(im)) or "").lower())
     return (webp/total) if total>0 else 0.0
@@ -1081,7 +1085,7 @@ def _report_html(s:Dict[str,Any])->str:
 def send_email(subject:str, html_content:str, to:Optional[List[str]]=None)->Dict[str,Any]:
     if not ENABLE_EMAIL: return {"ok":False,"error":"email_disabled"}
     if not SENDGRID_API_KEY: return {"ok":False,"error":"missing SENDGRID_API_KEY"}
-    to_list=[t for t in (to or EMAIL_TO) if t]; 
+    to_list=[t for t in (to or EMAIL_TO) if t]
     if not to_list: return {"ok":False,"error":"empty_email_to"}
     payload={"personalizations":[{"to":[{"email":x} for x in to_list]}],
              "from":{"email":EMAIL_FROM},"subject":subject,"content":[{"type":"text/html","value":html_content}]}
@@ -1097,9 +1101,9 @@ def send_email(subject:str, html_content:str, to:Optional[List[str]]=None)->Dict
 def daily_report():
     try:
         prods=shopify_get_all_products(max_items=1000); scanned=len(prods)
-        orphans, below, ratios=[], [], []
+        orphans, below, ratios = [], [], []
         for p in prods:
-            il=count_internal_links(p.get("body_html") or ""); 
+            il=count_internal_links(p.get("body_html") or "")
             if il<ORPHAN_LINK_MIN: orphans.append({"id":p.get("id"),"handle":p.get("handle"),"title":p.get("title"),"internal_links":il})
             wr=_image_webp_ratio(p); ratios.append(wr)
             if wr<SPEED_WEBP_THRESHOLD: below.append({"id":p.get("id"),"handle":p.get("handle"),"title":p.get("title"),"webp_ratio":wr})
