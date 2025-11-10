@@ -710,7 +710,7 @@ def find_related_products(target:dict, candidates:List[dict], k:int)->List[dict]
         if c.get("id")==target.get("id"): continue
         cset = _extract_tokens_for_match(c); score=len(tgt & cset)
         if score>0: scored.append((score,c))
-    scored.sort(key=lambda x;x[0], reverse=True)
+    scored.sort(key=lambda x: x[0], reverse=True)
     return [c for _,c in scored[:max(0,k)]]
 
 def inject_related_links_bottom(body_html:str, related:List[dict])->str:
