@@ -588,14 +588,27 @@ def _build_keyword_map(limit:int, min_len:int, include_bigrams:bool, scope:str="
             "scanned":scanned}
 
 def _get_keyword_map(limit:int, min_len:int, include_bigrams:bool, scope:str="all", force:bool=False)->Dict[str,Any]:
+    # 캐시가 유효하면 그대로 반환
     if (not force) and _cache_valid(KEYWORD_CACHE_TTL_MIN):
-        return {"unigrams":_kw_cache["unigrams"][:limit],
-                "bigrams": _kw_cache["bigrams"][:limit] if include_bigrams else [],
-                "scanned": _kw_cache["scanned"], "cached":True,
-                "age_sec": time.time()-_kw_cache["built_at"], "params":_kw_cache["params"]}
+        return {"unigrams": _kw_cache["unigrams"][:limit],
+                "bigrams":  _kw_cache["bigrams"][:limit] if include_bigrams else [],
+                "scanned":  _kw_cache["scanned"], "cached":True,
+                "age_sec":  time.time()-_kw_cache["built_at"], "params":_kw_cache["params"]}
+    # 새로 빌드
     data = _build_keyword_map(limit, min_len, include_bigrams, scope)
-    _kw_cache.update({"built_at":time.time(),"params":{"limit":limit,"min_len":min_len,"include_bigrams":include,"scope":scope},
-                      "unigrams":data["unigrams"],"bigrams":data["bigrams"],"scanned":data["scanned"]})
+    # ✅ 잘못된 변수명 include → include_bigrams 로 수정
+    _kw_cache.update({
+        "built_at": time.time(),
+        "params":   {
+            "limit": limit,
+            "min_len": min_len,
+            "include_bigrams": include_bigrams,  # <-- fix
+            "scope": scope
+        },
+        "unigrams": data["unigrams"],
+        "bigrams":  data["bigrams"],
+        "scanned":  data["scanned"],
+    })
     return {**data,"cached":False,"age_sec":0,"params":_kw_cache["params"]}
 
 @app.get("/seo/keywords/run")
@@ -697,7 +710,7 @@ def find_related_products(target:dict, candidates:List[dict], k:int)->List[dict]
         if c.get("id")==target.get("id"): continue
         cset = _extract_tokens_for_match(c); score=len(tgt & cset)
         if score>0: scored.append((score,c))
-    scored.sort(key=lambda x:x[0], reverse=True)
+    scored.sort(key=lambda x;x[0], reverse=True)
     return [c for _,c in scored[:max(0,k)]]
 
 def inject_related_links_bottom(body_html:str, related:List[dict])->str:
@@ -1233,5 +1246,6 @@ def root():
 if __name__=="__main__":
     port=int(os.getenv("PORT","8000"))
     app.run(host="0.0.0.0", port=port)
+
 
 
